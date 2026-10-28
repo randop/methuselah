@@ -1,18 +1,17 @@
 #include "methuselah/git_credentials.hpp"
 
 #include <algorithm>
-#include <boost/property_tree/ptree.hpp>
 #include <cstddef>
 #include <iostream>
 #include <sstream>
+#include <unordered_map>
 
 namespace methuselah {
 
 GitPredicate GitPredicate::parse(const std::string &input) {
   GitPredicate predicate;
 
-  namespace pt = boost::property_tree;
-  pt::ptree tree;
+  std::unordered_map<std::string, std::string> fields;
 
   std::istringstream iss(input);
   std::string line;
@@ -31,31 +30,20 @@ GitPredicate GitPredicate::parse(const std::string &input) {
     std::string value = line.substr(eq_pos + 1);
 
     if (key.size() >= 2 && key.substr(key.size() - 2) == "[]") {
-      key = key.substr(0, key.size() - 2);
-      pt::ptree child;
-      child.put("", value);
-      tree.add_child(key, child);
+      if (key == "capability[]") {
+        predicate.capabilities_.push_back(value);
+      } else if (key == "wwwauth[]") {
+        predicate.wwwauth_.push_back(value);
+      }
     } else {
-      tree.put(key, value);
+      fields[key] = value;
     }
   }
 
-  if (tree.count("capability") > 0) {
-    for (const auto &item : tree.get_child("capability")) {
-      predicate.capabilities_.push_back(item.second.data());
-    }
-  }
-
-  if (tree.count("wwwauth") > 0) {
-    for (const auto &item : tree.get_child("wwwauth")) {
-      predicate.wwwauth_.push_back(item.second.data());
-    }
-  }
-
-  predicate.protocol_ = tree.get("protocol", "");
-  predicate.host_ = tree.get("host", "");
-  predicate.username_ = tree.get("username", "");
-  predicate.password_ = tree.get("password", "");
+  predicate.protocol_ = fields["protocol"];
+  predicate.host_ = fields["host"];
+  predicate.username_ = fields["username"];
+  predicate.password_ = fields["password"];
 
   return predicate;
 }

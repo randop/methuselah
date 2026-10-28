@@ -193,8 +193,7 @@ int run_ssh_flow() {
 } // namespace
 
 int Application::run(int argc, char **argv) {
-  const std::string_view flag{argv[1]};
-  if (flag == "--version") {
+  if (argc >= 2 && std::string_view{argv[1]} == "--version") {
     version();
     return EXIT_SUCCESS;
   }
@@ -213,7 +212,7 @@ int Application::run(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  if (macro == Macro::Git && argc >= 3 && std::strcmp(argv[2], "store") == 0) {
+  if (macro == Macro::Git && (argc < 3 || std::strcmp(argv[2], "get") != 0)) {
     return EXIT_SUCCESS;
   } else if (macro == Macro::Gpg) {
     PinentryServer server("gpg credentials", kDefaultMessage);

@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-methuselah --macro=ssh
+exec methuselah --macro=ssh

@@ -2,9 +2,7 @@
 url = https://github.com/raysan5/raygui.git
 revision = b256d4552b4105912d0556541a03862bdc5c0777
 depth = 1
+patch_directory = raygui
 
 [provide]
 raygui_inc = raygui_inc
-
-[patch]
-directory = raygui

@@ -91,7 +91,7 @@ gpg_error_t PinentryServer::Impl::cmd_getpin(assuan_context_t ctx,
 
 gpg_error_t PinentryServer::Impl::cmd_confirm(assuan_context_t /*ctx*/,
                                               char * /*line*/) {
-  return 0;
+  return gpg_error(GPG_ERR_NOT_CONFIRMED);
 }
 
 gpg_error_t PinentryServer::Impl::on_getpin(assuan_context_t ctx) {

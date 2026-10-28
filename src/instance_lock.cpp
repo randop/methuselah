@@ -5,18 +5,18 @@
 #include <cstdlib>
 #include <fcntl.h>
 #include <iostream>
+#include <string>
 #include <sys/file.h>
 #include <unistd.h>
 
 namespace methuselah {
-namespace {
-
-constexpr const char kLockFile[] = "/tmp/" PROJECT_NAME ".lock";
-
-} // namespace
-
 InstanceLock::InstanceLock() {
-  fd_ = ::open(kLockFile, O_CREAT | O_RDWR, 0666);
+  const char *runtime_dir = std::getenv("XDG_RUNTIME_DIR");
+  const std::string lock_path =
+      runtime_dir && *runtime_dir
+          ? std::string(runtime_dir) + "/" PROJECT_NAME ".lock"
+          : "/tmp/" PROJECT_NAME "-" + std::to_string(::getuid()) + ".lock";
+  fd_ = ::open(lock_path.c_str(), O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600);
   if (fd_ < 0) {
     acquired_ = false;
     return;
@@ -39,7 +39,6 @@ InstanceLock::~InstanceLock() {
   if (fd_ < 0) {
     return;
   }
-  ::unlink(kLockFile);
   ::flock(fd_, LOCK_UN);
   ::close(fd_);
   fd_ = -1;
