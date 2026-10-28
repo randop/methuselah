@@ -39,22 +39,6 @@ else
 fi
 export CMAKE_PREFIX_PATH
 
-if [ ! -f "subprojects/raygui/src/raygui.h" ]; then
-  mkdir -p subprojects/raygui
-  meson subprojects download raygui
-  set +e
-  meson subprojects update --reset raygui
-  set -e
-  cat <<EOF >subprojects/raygui/meson.build
-project('raygui', 'c')
-raygui_inc = include_directories('src', is_system: true)
-raygui_dep = declare_dependency(
-  include_directories: raygui_inc
-)
-meson.override_dependency('raygui', raygui_dep)
-EOF
-fi
-
 if [ ! -d ".build" ]; then
   meson setup .build --buildtype=release
 fi
