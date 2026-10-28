@@ -16,7 +16,8 @@ InstanceLock::InstanceLock() {
       runtime_dir && *runtime_dir
           ? std::string(runtime_dir) + "/" PROJECT_NAME ".lock"
           : "/tmp/" PROJECT_NAME "-" + std::to_string(::getuid()) + ".lock";
-  fd_ = ::open(lock_path.c_str(), O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600);
+  fd_ = ::open(lock_path.c_str(), O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC,
+               0600);
   if (fd_ < 0) {
     acquired_ = false;
     return;
