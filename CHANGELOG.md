@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-10-28
+
+### Changed
+- Git credential mode handles only `git credential get`; `store` and `erase`
+  exit without prompting.
+- Git credential fields are parsed into a map instead of Boost.PropertyTree.
+- `scripts/format.sh` now requires Meson 1.5 or newer and fails with a clear
+  error.
+- GPG and SSH wrappers `exec` the helper so signals and exit codes propagate.
+- `scripts/debug.sh` configures and compiles the debug build before running
+  GDB.
+- Documented the full Debian build dependencies and Boost 1.90.0 installation.
+
+### Fixed
+- `--version` no longer reads past `argv` when no arguments are given.
+- Pinentry `CONFIRM` requests report `GPG_ERR_NOT_CONFIRMED` instead of
+  always succeeding.
+- raygui dependency is supplied via the wrap's `patch_directory`, fixing the
+  Meson subproject setup.
+
+### Security
+- Instance lock is created in `$XDG_RUNTIME_DIR` (falling back to a per-UID
+  file in `/tmp`) with `0600`, `O_NOFOLLOW`, and `O_CLOEXEC`.
+- Lock file is no longer unlinked on release, preventing pre-creation attacks.
+
 ## [0.5.1] - 2026-08-28
 
 ### Added
