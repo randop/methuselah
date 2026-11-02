@@ -1,2 +1,12 @@
 #!/usr/bin/env bash
-exec methuselah --macro=ssh
+
+prompt="${1-}"
+
+case "${prompt,,}" in
+*"are you sure you want to continue connecting"*)
+  printf '%s\n' "yes"
+  ;;
+*)
+  exec methuselah --macro=ssh
+  ;;
+esac
