@@ -14,4 +14,4 @@ Credential helper for Git, GPG, SSH
 
 ---
 
-![Version](https://shieldcn.dev/github/randop/methuselah/release) ![STD: 20](https://shieldcn.dev/badge/STD-20-lightgrey)
+![Version](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fgithub.com%2Frandop%2Fmethuselah%2Fraw%2Frefs%2Fheads%2Fmaster%2FVERSION&search=(.*)&label=Version&color=blue) ![STD: 20](https://img.shields.io/badge/STD-20-lightgrey)
