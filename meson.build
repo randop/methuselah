@@ -43,8 +43,14 @@ xi_dep = dependency('xi')
 xrandr_dep = dependency('xrandr')
 xcursor_dep = dependency('xcursor')
 
-gpgme_dep = dependency('gpgme', required: true)
-gpgerror_dep = dependency('gpg-error', required: true)
+gpgme_dep = dependency('gpgme', required: true, version: '>=2.2.0', static: true)
+
+gpgerror_dep = dependency(
+    'gpg-error',
+    required: true,
+    version: '>=1.61',
+    static: true,
+)
 
 boost_dep = dependency(
     'boost',
@@ -62,7 +68,12 @@ spdlog_dep = dependency(
     ],
 )
 
-assuan_dep = dependency('libassuan', required: true)
+assuan_dep = dependency(
+    'libassuan',
+    required: true,
+    version: '>=3.0.2',
+    static: true,
+)
 
 # Configuration
 conf = configuration_data()
