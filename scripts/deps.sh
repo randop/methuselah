@@ -61,25 +61,140 @@ else
 fi
 export CMAKE_PREFIX_PATH
 
-GPGME_VERSION=1.23.2
-GPGME_TAG=gpgme-1.23.2
-if [ ! -f "${OPT_PREFIX}/gpgme/current/lib/gpgme.a" ]; then
+# ---------------------------------------------------------------------------
+# libgpg-error (gpgrt) 1.61
+# ---------------------------------------------------------------------------
+GPG_ERROR_VERSION=1.61
+GPG_ERROR_TAG=libgpg-error-1.61
+if [ ! -f "${OPT_PREFIX}/libgpg-error/current/lib/libgpg-error.a" ]; then
+  echo "Compiling libgpg-error ${GPG_ERROR_VERSION} ..."
+  mkdir -p ${OPT_PREFIX}/libgpg-error/current
+  rm -rf ${OPT_PREFIX}/libgpg-error/current/*
+  rm -rf ${OPT_PREFIX}/libgpg-error/${GPG_ERROR_VERSION}
+  git clone -b ${GPG_ERROR_TAG} https://github.com/gpg/libgpg-error.git \
+    ${OPT_PREFIX}/libgpg-error/${GPG_ERROR_VERSION}
+  rm -rf ${OPT_PREFIX}/libgpg-error/${GPG_ERROR_VERSION}/.git
+  rm -rf ${OPT_PREFIX}/libgpg-error/${GPG_ERROR_VERSION}/.github
+  cd ${OPT_PREFIX}/libgpg-error/${GPG_ERROR_VERSION}
+  ./autogen.sh
+  ./configure \
+    --prefix=${OPT_PREFIX}/libgpg-error/current \
+    --enable-static \
+    --disable-shared \
+    --disable-nls \
+    --disable-doc \
+    --disable-languages
+  make -j$(nproc)
+  make install
+  rm -f ${LOCAL_PKGCONFIG}/gpg-error.pc
+  echo "Checking compiled libgpg-error..." &&
+    file ${OPT_PREFIX}/libgpg-error/current/lib/libgpg-error.a
+else
+  echo "libgpg-error: OK"
+fi
+
+if [ ! -f "${LOCAL_PKGCONFIG}/gpg-error.pc" ]; then
+  ln -sv ${OPT_PREFIX}/libgpg-error/current/lib/pkgconfig/gpg-error.pc \
+    ${LOCAL_PKGCONFIG}/gpg-error.pc
+fi
+export CMAKE_PREFIX_PATH="${OPT_PREFIX}/libgpg-error/current${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
+export PKG_CONFIG_PATH="${OPT_PREFIX}/libgpg-error/current/lib/pkgconfig:${PKG_CONFIG_PATH}"
+
+# ---------------------------------------------------------------------------
+# libassuan 3.0.2
+# ---------------------------------------------------------------------------
+LIBASSUAN_VERSION=3.0.2
+LIBASSUAN_TAG=libassuan-3.0.2
+if [ ! -f "${OPT_PREFIX}/libassuan/current/lib/libassuan.a" ]; then
+  echo "Compiling libassuan ${LIBASSUAN_VERSION} ..."
+  mkdir -p ${OPT_PREFIX}/libassuan/current
+  rm -rf ${OPT_PREFIX}/libassuan/current/*
+  rm -rf ${OPT_PREFIX}/libassuan/${LIBASSUAN_VERSION}
+  git clone -b ${LIBASSUAN_TAG} https://github.com/gpg/libassuan.git \
+    ${OPT_PREFIX}/libassuan/${LIBASSUAN_VERSION}
+  rm -rf ${OPT_PREFIX}/libassuan/${LIBASSUAN_VERSION}/.git
+  rm -rf ${OPT_PREFIX}/libassuan/${LIBASSUAN_VERSION}/.github
+  cd ${OPT_PREFIX}/libassuan/${LIBASSUAN_VERSION}
+  ./autogen.sh
+  ./configure \
+    --prefix=${OPT_PREFIX}/libassuan/current \
+    --enable-static \
+    --disable-shared \
+    --with-libgpg-error-prefix=${OPT_PREFIX}/libgpg-error/current
+  make -j$(nproc)
+  make install
+  rm -f ${LOCAL_PKGCONFIG}/libassuan.pc
+  echo "Checking compiled libassuan..." &&
+    file ${OPT_PREFIX}/libassuan/current/lib/libassuan.a
+else
+  echo "libassuan: OK"
+fi
+
+if [ ! -f "${LOCAL_PKGCONFIG}/libassuan.pc" ]; then
+  ln -sv ${OPT_PREFIX}/libassuan/current/lib/pkgconfig/libassuan.pc \
+    ${LOCAL_PKGCONFIG}/libassuan.pc
+fi
+export CMAKE_PREFIX_PATH="${OPT_PREFIX}/libassuan/current:${CMAKE_PREFIX_PATH}"
+export PKG_CONFIG_PATH="${OPT_PREFIX}/libassuan/current/lib/pkgconfig:${PKG_CONFIG_PATH}"
+
+# ---------------------------------------------------------------------------
+# gpgme 2.2.0
+# ---------------------------------------------------------------------------
+GPGME_VERSION=2.2.0
+GPGME_TAG=gpgme-2.2.0
+if [ ! -f "${OPT_PREFIX}/gpgme/current/lib/libgpgme.a" ]; then
+  echo "Compiling gpgme ${GPGME_VERSION} ..."
   mkdir -p ${OPT_PREFIX}/gpgme/current
   rm -rf ${OPT_PREFIX}/gpgme/current/*
   rm -rf ${OPT_PREFIX}/gpgme/${GPGME_VERSION}
-  git clone -b ${GPGME_TAG} https://github.com/gpg/gpgme.git ${OPT_PREFIX}/gpgme/${GPGME_VERSION}
+  git clone -b ${GPGME_TAG} https://github.com/gpg/gpgme.git \
+    ${OPT_PREFIX}/gpgme/${GPGME_VERSION}
   rm -rf ${OPT_PREFIX}/gpgme/${GPGME_VERSION}/.git
+  rm -rf ${OPT_PREFIX}/gpgme/${GPGME_VERSION}/.github
   cd ${OPT_PREFIX}/gpgme/${GPGME_VERSION}
   ./autogen.sh
-  ./configure --prefix=${OPT_PREFIX}/gpgme/current MAKEINFO=true
+  ./configure \
+    --prefix=${OPT_PREFIX}/gpgme/current \
+    --enable-static \
+    --disable-shared \
+    --enable-languages= \
+    --disable-gpg-test \
+    --disable-gpgsm-test \
+    --disable-g13-test \
+    --disable-gpgconf-test \
+    --with-libgpg-error-prefix=${OPT_PREFIX}/libgpg-error/current \
+    --with-libassuan-prefix=${OPT_PREFIX}/libassuan/current \
+    MAKEINFO=true
   make -j$(nproc)
   make install
-  rm -f $LOCAL_PKGCONFIG/gpgme.pc
+  rm -f ${LOCAL_PKGCONFIG}/gpgme.pc
+  echo "Checking compiled gpgme..." &&
+    file ${OPT_PREFIX}/gpgme/current/lib/libgpgme.a
 else
   echo "gpgme: OK"
 fi
 
 if [ ! -f "${LOCAL_PKGCONFIG}/gpgme.pc" ]; then
-  ln -sv ${OPT_PREFIX}/gpgme/current/lib/pkgconfig/gpgme.pc ${LOCAL_PKGCONFIG}/gpgme.pc
+  ln -sv ${OPT_PREFIX}/gpgme/current/lib/pkgconfig/gpgme.pc \
+    ${LOCAL_PKGCONFIG}/gpgme.pc
 fi
 export CMAKE_PREFIX_PATH="${OPT_PREFIX}/gpgme/current:${CMAKE_PREFIX_PATH}"
+export PKG_CONFIG_PATH="${OPT_PREFIX}/gpgme/current/lib/pkgconfig:${PKG_CONFIG_PATH}"
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== GPG stack ready ==="
+echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+echo "CMAKE_PREFIX_PATH: $CMAKE_PREFIX_PATH"
+echo ""
+echo "Versions (pkg-config):"
+pkg-config --modversion gpg-error 2>/dev/null || echo "  gpg-error: (not found)"
+pkg-config --modversion libassuan 2>/dev/null || echo "  libassuan: (not found)"
+pkg-config --modversion gpgme 2>/dev/null || echo "  gpgme: (not found)"
+echo ""
+echo "Static libraries:"
+ls -1 ${OPT_PREFIX}/libgpg-error/current/lib/libgpg-error.a \
+  ${OPT_PREFIX}/libassuan/current/lib/libassuan.a \
+  ${OPT_PREFIX}/gpgme/current/lib/libgpgme.a 2>/dev/null || true
