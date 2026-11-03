@@ -144,23 +144,73 @@ PasswordPromptLayout password_prompt_layout(Rectangle window,
 }
 
 void draw_password_overlay(Rectangle input, const char *password,
-                           Color background) {
+                           Color background, Font font) {
   if (password == nullptr || password[0] == '\0') {
     return;
   }
 
   const float border = static_cast<float>(GuiGetStyle(TEXTBOX, BORDER_WIDTH));
   const float padding = static_cast<float>(GuiGetStyle(TEXTBOX, TEXT_PADDING));
+  const float font_size = static_cast<float>(GuiGetStyle(DEFAULT, TEXT_SIZE));
+  const float spacing = static_cast<float>(GuiGetStyle(DEFAULT, TEXT_SPACING));
+  const float star_advance = static_cast<float>(GuiGetTextWidth("*"));
   const float available_width = input.width - 2.0f * (border + padding);
-  if (available_width <= 0.0f) {
+  if (available_width <= 0.0f || star_advance <= 0.0f) {
     return;
   }
 
-  const float text_width = static_cast<float>(GuiGetTextWidth(password));
-  const Rectangle overlay{input.x + border + padding, input.y + border,
-                          std::min(text_width, available_width),
-                          input.height - 2.0f * border};
-  DrawRectangleRec(overlay, Fade(background, 0.9f));
+  const int password_chars = GetCodepointCount(password);
+  const float password_width =
+      static_cast<float>(password_chars) * star_advance;
+
+  // Leave the right edge free when the text scrolls so the caret stays visible.
+  const bool scrolls = password_width > available_width;
+  const float mask_width = std::min(
+      password_width, available_width - (scrolls ? star_advance : 0.0f));
+  if (mask_width <= 0.0f) {
+    return;
+  }
+
+  const int max_stars =
+      std::max(1, static_cast<int>(mask_width / star_advance));
+  const int star_count = std::min(password_chars, max_stars);
+  const std::string stars(static_cast<std::size_t>(star_count), '*');
+
+  const Rectangle overlay{
+      input.x + border + padding, input.y + border,
+      std::min(static_cast<float>(star_count) * star_advance, mask_width),
+      input.height - 2.0f * border};
+  DrawRectangleRec(overlay, Fade(background, 0.85f));
+
+  // Match raygui's vertically centered text position so the mask lines up with
+  // the hidden password text and its caret.
+  const float star_y = static_cast<float>(static_cast<int>(
+      overlay.y + (overlay.height - font_size) / 2.0f +
+      static_cast<float>(static_cast<int>(overlay.height) % 2)));
+  const Vector2 star_pos{static_cast<float>(static_cast<int>(overlay.x)),
+                         star_y};
+  const Color star_color = GetColor(GuiGetStyle(TEXTBOX, TEXT_COLOR_NORMAL));
+
+  // Blur the asterisks by stamping them at several offsets: the accumulated
+  // low-alpha copies soften their silhouette into a frosted glow.
+  constexpr Vector2 kBlurOffsets[] = {
+      {-4.0f, 0.0f}, {-3.0f, -2.0f}, {-3.0f, 2.0f}, {-2.0f, -3.0f},
+      {-2.0f, 3.0f}, {-1.0f, -4.0f}, {-1.0f, 4.0f}, {0.0f, -4.0f},
+      {0.0f, 4.0f},  {1.0f, -4.0f},  {1.0f, 4.0f},  {2.0f, -3.0f},
+      {2.0f, 3.0f},  {3.0f, -2.0f},  {3.0f, 2.0f},  {4.0f, 0.0f},
+  };
+
+  BeginScissorMode(static_cast<int>(overlay.x), static_cast<int>(overlay.y),
+                   static_cast<int>(overlay.width),
+                   static_cast<int>(overlay.height));
+  for (const Vector2 &offset : kBlurOffsets) {
+    DrawTextEx(font, stars.c_str(),
+               {star_pos.x + offset.x, star_pos.y + offset.y}, font_size,
+               spacing, Fade(star_color, 0.06f));
+  }
+  DrawTextEx(font, stars.c_str(), star_pos, font_size, spacing,
+             Fade(star_color, 0.9f));
+  EndScissorMode();
 }
 
 } // namespace
@@ -318,7 +368,8 @@ UiSession::prompt_password(const PromptOptions &options) {
       const Color background =
           edit_mode ? GetColor(GuiGetStyle(TEXTBOX, BASE_COLOR_PRESSED))
                     : GetColor(GuiGetStyle(DEFAULT, BACKGROUND_COLOR));
-      draw_password_overlay(layout.input, password_buf.data(), background);
+      draw_password_overlay(layout.input, password_buf.data(), background,
+                            impl_->font);
     }
 
     GuiSetStyle(TEXTBOX, TEXT_ALIGNMENT, previous_text_alignment);
