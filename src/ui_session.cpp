@@ -13,6 +13,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <iostream>
@@ -82,6 +83,134 @@ void raylib_debug_callback(int log_level, const char *text, va_list args) {
   char formatted[2048];
   vsnprintf(formatted, sizeof(formatted), text, args);
   SPDLOG_INFO("<{}> {}", prefix, formatted);
+}
+
+struct PasswordPromptLayout {
+  Rectangle message{};
+  Rectangle input{};
+  Rectangle reveal{};
+  Rectangle continue_button{};
+  Rectangle cancel_button{};
+};
+
+PasswordPromptLayout password_prompt_layout(Rectangle window,
+                                            const char *message) {
+  constexpr float kStatusBarHeight = 24.0f;
+  constexpr float kButtonHeight = 24.0f;
+  constexpr float kButtonPadding = 12.0f;
+  constexpr float kInputHeight = 26.0f;
+  constexpr float kRevealGap = 4.0f;
+
+  const int text_size = GuiGetStyle(DEFAULT, TEXT_SIZE);
+  const int message_input_height = static_cast<int>(
+      window.height - kStatusBarHeight - GuiGetStyle(STATUSBAR, BORDER_WIDTH) -
+      kButtonHeight - 2.0f * kButtonPadding);
+
+  PasswordPromptLayout layout;
+  if (message != nullptr) {
+    const int message_width = GuiGetTextWidth(message) + 2;
+    layout.message = {window.x + window.width / 2.0f - message_width / 2.0f,
+                      window.y + kStatusBarHeight +
+                          message_input_height / 4.0f - text_size / 2.0f,
+                      static_cast<float>(message_width),
+                      static_cast<float>(text_size)};
+  }
+
+  layout.input.x = window.x + kButtonPadding;
+  layout.input.y = window.y + kStatusBarHeight - kInputHeight / 2.0f;
+  if (message == nullptr) {
+    layout.input.y = window.y + kStatusBarHeight + kButtonPadding;
+  } else {
+    layout.input.y +=
+        static_cast<float>(message_input_height / 2 + message_input_height / 4);
+  }
+  layout.input.width = window.width - 2.0f * kButtonPadding;
+  layout.input.height = kInputHeight;
+
+  layout.reveal = {layout.input.x + layout.input.width - kInputHeight,
+                   layout.input.y, kInputHeight, kInputHeight};
+  layout.input.width -= kRevealGap + kInputHeight;
+
+  const float button_y =
+      window.y + window.height - kButtonHeight - kButtonPadding;
+  const float button_width = (window.width - 3.0f * kButtonPadding) / 2.0f;
+  layout.continue_button = {window.x + kButtonPadding, button_y, button_width,
+                            kButtonHeight};
+  layout.cancel_button = {layout.continue_button.x + button_width +
+                              kButtonPadding,
+                          button_y, button_width, kButtonHeight};
+
+  return layout;
+}
+
+void draw_password_overlay(Rectangle input, const char *password,
+                           Color background, Font font) {
+  if (password == nullptr || password[0] == '\0') {
+    return;
+  }
+
+  const float border = static_cast<float>(GuiGetStyle(TEXTBOX, BORDER_WIDTH));
+  const float padding = static_cast<float>(GuiGetStyle(TEXTBOX, TEXT_PADDING));
+  const float font_size = static_cast<float>(GuiGetStyle(DEFAULT, TEXT_SIZE));
+  const float spacing = static_cast<float>(GuiGetStyle(DEFAULT, TEXT_SPACING));
+  const float star_advance = static_cast<float>(GuiGetTextWidth("*"));
+  const float available_width = input.width - 2.0f * (border + padding);
+  if (available_width <= 0.0f || star_advance <= 0.0f) {
+    return;
+  }
+
+  const int password_chars = GetCodepointCount(password);
+  const float password_width =
+      static_cast<float>(password_chars) * star_advance;
+
+  // Leave the right edge free when the text scrolls so the caret stays visible.
+  const bool scrolls = password_width > available_width;
+  const float mask_width = std::min(
+      password_width, available_width - (scrolls ? star_advance : 0.0f));
+  if (mask_width <= 0.0f) {
+    return;
+  }
+
+  const int max_stars =
+      std::max(1, static_cast<int>(mask_width / star_advance));
+  const int star_count = std::min(password_chars, max_stars);
+  const std::string stars(static_cast<std::size_t>(star_count), '*');
+
+  const Rectangle overlay{
+      input.x + border + padding, input.y + border,
+      std::min(static_cast<float>(star_count) * star_advance, mask_width),
+      input.height - 2.0f * border};
+  DrawRectangleRec(overlay, Fade(background, 0.85f));
+
+  // Match raygui's vertically centered text position so the mask lines up with
+  // the hidden password text and its caret.
+  const float star_y = static_cast<float>(static_cast<int>(
+      overlay.y + (overlay.height - font_size) / 2.0f +
+      static_cast<float>(static_cast<int>(overlay.height) % 2)));
+  const Vector2 star_pos{static_cast<float>(static_cast<int>(overlay.x)),
+                         star_y};
+  const Color star_color = GetColor(GuiGetStyle(TEXTBOX, TEXT_COLOR_NORMAL));
+
+  // Blur the asterisks by stamping them at several offsets: the accumulated
+  // low-alpha copies soften their silhouette into a frosted glow.
+  constexpr Vector2 kBlurOffsets[] = {
+      {-4.0f, 0.0f}, {-3.0f, -2.0f}, {-3.0f, 2.0f}, {-2.0f, -3.0f},
+      {-2.0f, 3.0f}, {-1.0f, -4.0f}, {-1.0f, 4.0f}, {0.0f, -4.0f},
+      {0.0f, 4.0f},  {1.0f, -4.0f},  {1.0f, 4.0f},  {2.0f, -3.0f},
+      {2.0f, 3.0f},  {3.0f, -2.0f},  {3.0f, 2.0f},  {4.0f, 0.0f},
+  };
+
+  BeginScissorMode(static_cast<int>(overlay.x), static_cast<int>(overlay.y),
+                   static_cast<int>(overlay.width),
+                   static_cast<int>(overlay.height));
+  for (const Vector2 &offset : kBlurOffsets) {
+    DrawTextEx(font, stars.c_str(),
+               {star_pos.x + offset.x, star_pos.y + offset.y}, font_size,
+               spacing, Fade(star_color, 0.06f));
+  }
+  DrawTextEx(font, stars.c_str(), star_pos, font_size, spacing,
+             Fade(star_color, 0.9f));
+  EndScissorMode();
 }
 
 } // namespace
@@ -176,9 +305,15 @@ UiSession::prompt_password(const PromptOptions &options) {
   Shader sdfShader = LoadShaderFromMemory(NULL, SHADER_SDF);
 
   SecureArray<256> password_buf;
-  bool secret_view_active = false;
+  bool reveal_password = false;
+  bool edit_mode = false;
   int result = 0; // 0 = open, 1 = OK, -1 = Cancel/timeout/window close
   const double start = GetTime();
+
+  const Rectangle box{impl_->screen_width / 2 - 300,
+                      impl_->screen_height / 2 - 125, 600, 250};
+  const PasswordPromptLayout layout =
+      password_prompt_layout(box, options.message.c_str());
 
   while (!WindowShouldClose() && result == 0 && !SignalGuard::received()) {
     if (options.timeout_seconds > 0 &&
@@ -194,19 +329,64 @@ UiSession::prompt_password(const PromptOptions &options) {
     DrawTextEx(impl_->font, PROJECT_TAG, {40.0f, 40.0f}, 48.0f, 1.0f, DARKBLUE);
     DrawFPS(impl_->screen_width - 120, 20);
 
-    const Rectangle box{impl_->screen_width / 2 - 300,
-                        impl_->screen_height / 2 - 125, 600, 250};
-    const int dialog_result = GuiTextInputBox(
-        box, options.title.c_str(), options.message.c_str(), "Continue;Cancel",
-        password_buf.data(), password_buf.size(), &secret_view_active);
-    EndShaderMode();
-
-    if (dialog_result == 2 || dialog_result == 0) {
+    // GuiTextInputBox() reveals the raw password while it is being edited, so
+    // draw the dialog here with a hidden text field and an overlay instead.
+    if (GuiWindowBox(box, options.title.c_str()) != 0) {
       result = -1;
-    } else if (dialog_result == 1) {
-      result = 1;
     }
 
+    if (layout.message.width > 0.0f) {
+      const int previous_alignment = GuiGetStyle(LABEL, TEXT_ALIGNMENT);
+      GuiSetStyle(LABEL, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
+      GuiLabel(layout.message, options.message.c_str());
+      GuiSetStyle(LABEL, TEXT_ALIGNMENT, previous_alignment);
+    }
+
+    const int previous_text_alignment = GuiGetStyle(TEXTBOX, TEXT_ALIGNMENT);
+    GuiSetStyle(TEXTBOX, TEXT_ALIGNMENT, TEXT_ALIGN_LEFT);
+
+    // Prevent plaintext from being drawn outside the overlay at any font size.
+    constexpr int text_colors[] = {TEXT_COLOR_NORMAL, TEXT_COLOR_FOCUSED,
+                                   TEXT_COLOR_PRESSED, TEXT_COLOR_DISABLED};
+    int previous_text_colors[4];
+    if (!reveal_password) {
+      for (int i = 0; i < 4; ++i) {
+        previous_text_colors[i] = GuiGetStyle(TEXTBOX, text_colors[i]);
+        GuiSetStyle(TEXTBOX, text_colors[i], 0);
+      }
+    }
+
+    if (GuiTextBox(layout.input, password_buf.data(), password_buf.size(),
+                   edit_mode)) {
+      edit_mode = !edit_mode;
+    }
+
+    if (!reveal_password) {
+      for (int i = 0; i < 4; ++i) {
+        GuiSetStyle(TEXTBOX, text_colors[i], previous_text_colors[i]);
+      }
+      const Color background =
+          edit_mode ? GetColor(GuiGetStyle(TEXTBOX, BASE_COLOR_PRESSED))
+                    : GetColor(GuiGetStyle(DEFAULT, BACKGROUND_COLOR));
+      draw_password_overlay(layout.input, password_buf.data(), background,
+                            impl_->font);
+    }
+
+    GuiSetStyle(TEXTBOX, TEXT_ALIGNMENT, previous_text_alignment);
+
+    GuiToggle(layout.reveal,
+              reveal_password ? GuiIconText(ICON_EYE_ON, NULL)
+                              : GuiIconText(ICON_EYE_OFF, NULL),
+              &reveal_password);
+
+    if (GuiButton(layout.continue_button, "Continue")) {
+      result = 1;
+    }
+    if (GuiButton(layout.cancel_button, "Cancel")) {
+      result = -1;
+    }
+
+    EndShaderMode();
     EndDrawing();
   }
 

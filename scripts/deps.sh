@@ -120,6 +120,7 @@ if [ ! -f "${OPT_PREFIX}/libassuan/current/lib/libassuan.a" ]; then
     --prefix=${OPT_PREFIX}/libassuan/current \
     --enable-static \
     --disable-shared \
+    --disable-doc \
     --with-libgpg-error-prefix=${OPT_PREFIX}/libgpg-error/current
   make -j$(nproc)
   make install

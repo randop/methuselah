@@ -40,7 +40,7 @@ fi
 export CMAKE_PREFIX_PATH
 
 if [ ! -d ".build" ]; then
-  meson setup .build --buildtype=release
+  meson setup .build --buildtype=release --prefer-static --default-library=static
 fi
 
 export BOOST_ROOT=${OPT_PREFIX}/boost/current

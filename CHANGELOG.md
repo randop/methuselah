@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-03
+
+### Added
+- Blurred `*` mask for the passphrase field, sized to the typed text and drawn
+  with a soft halo so the plaintext stays hidden.
+
+### Changed
+- Passphrase prompt now uses a dedicated layout instead of
+  `GuiTextInputBox()`, keeping the reveal toggle and Continue/Cancel actions.
+- `scripts/compile.sh` configures Meson with `--prefer-static` and
+  `--default-library=static`.
+- `scripts/deps.sh` builds libassuan with `--disable-doc`.
+
+### Fixed
+- Caret remains visible while editing, including when long passphrases scroll
+  horizontally.
+
+### Security
+- Plaintext passphrase characters are no longer rendered while the masking
+  overlay is active.
+
 ## [0.5.3] - 2026-11-02
 
 ### Added
