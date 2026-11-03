@@ -280,7 +280,7 @@ UiSession::prompt_password(const PromptOptions &options) {
     DrawFPS(impl_->screen_width - 120, 20);
 
     // GuiTextInputBox() reveals the raw password while it is being edited, so
-    // draw the dialog here and cover the text with an overlay instead.
+    // draw the dialog here with a hidden text field and an overlay instead.
     if (GuiWindowBox(box, options.title.c_str()) != 0) {
       result = -1;
     }
@@ -295,12 +295,26 @@ UiSession::prompt_password(const PromptOptions &options) {
     const int previous_text_alignment = GuiGetStyle(TEXTBOX, TEXT_ALIGNMENT);
     GuiSetStyle(TEXTBOX, TEXT_ALIGNMENT, TEXT_ALIGN_LEFT);
 
+    // Prevent plaintext from being drawn outside the overlay at any font size.
+    constexpr int text_colors[] = {TEXT_COLOR_NORMAL, TEXT_COLOR_FOCUSED,
+                                   TEXT_COLOR_PRESSED, TEXT_COLOR_DISABLED};
+    int previous_text_colors[4];
+    if (!reveal_password) {
+      for (int i = 0; i < 4; ++i) {
+        previous_text_colors[i] = GuiGetStyle(TEXTBOX, text_colors[i]);
+        GuiSetStyle(TEXTBOX, text_colors[i], 0);
+      }
+    }
+
     if (GuiTextBox(layout.input, password_buf.data(), password_buf.size(),
                    edit_mode)) {
       edit_mode = !edit_mode;
     }
 
     if (!reveal_password) {
+      for (int i = 0; i < 4; ++i) {
+        GuiSetStyle(TEXTBOX, text_colors[i], previous_text_colors[i]);
+      }
       const Color background =
           edit_mode ? GetColor(GuiGetStyle(TEXTBOX, BASE_COLOR_PRESSED))
                     : GetColor(GuiGetStyle(DEFAULT, BACKGROUND_COLOR));
