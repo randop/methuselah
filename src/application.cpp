@@ -10,6 +10,7 @@
 #include "methuselah/macro.hpp"
 #include "methuselah/path.hpp"
 #include "methuselah/pinentry_server.hpp"
+#include "methuselah/process_info.hpp"
 #include "methuselah/secure_memory.hpp"
 #include "methuselah/security.hpp"
 #include "methuselah/signal_guard.hpp"
@@ -217,10 +218,19 @@ int Application::run(int argc, char **argv) {
   if (macro == Macro::Git && (argc < 3 || std::strcmp(argv[2], "get") != 0)) {
     return EXIT_SUCCESS;
   } else if (macro == Macro::Gpg) {
+    SPDLOG_TRACE("gpg security verification...");
+    auto svr = security.verify_gpg();
+
+    SPDLOG_TRACE("gpg security verification result");
+    if (svr != SecurityVerificationResult::passed) {
+      std::cerr << "Error: gpg macro security verification failure or faulted"
+                << std::endl;
+      return EXIT_FAILURE;
+    }
+
     PinentryServer server("gpg credentials", kDefaultMessage);
     return server.run();
   } else if (macro == Macro::Git) {
-
     auto svr = security.verify_git();
     if (svr != SecurityVerificationResult::passed) {
       std::cerr << "Error: git macro security verification failure or faulted"
@@ -233,7 +243,6 @@ int Application::run(int argc, char **argv) {
   } else if (macro == Macro::Dummy) {
     return run_dummy();
   } else if (macro == Macro::Ssh) {
-
     auto svr = security.verify_ssh();
     if (svr != SecurityVerificationResult::passed) {
       std::cerr << "Error: ssh macro security verification failure or faulted"
