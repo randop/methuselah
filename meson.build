@@ -81,8 +81,11 @@ conf.set('PROJECT_NAME', meson.project_name())
 conf.set('PROJECT_VERSION', meson.project_version())
 conf.set('PROJECT_DESCRIPTION', 'pinentry helper')
 if get_option('buildtype').startswith('release')
+    conf.set('SPDLOG_ACTIVE_LEVEL', 'SPDLOG_LEVEL_INFO')
     conf.set('SPDLOG_DEFAULT_LEVEL', 'spdlog::level::info')
 else
+    conf.set('PROJECT_DESCRIPTION', 'pinentry DEBUG')
+    conf.set('SPDLOG_ACTIVE_LEVEL', 'SPDLOG_LEVEL_TRACE')
     conf.set('SPDLOG_DEFAULT_LEVEL', 'spdlog::level::trace')
 endif
 

@@ -5,12 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-11-09
+
+### Added
+- Security verification for the GPG macro, checking that the calling process is
+  `gpg-agent`, `gpg`, or `gpg2`.
+
+### Security
+- GPG pinentry requests are rejected unless the caller is a root-owned GPG
+  executable without group/other write access.
+
 ## [0.6.1] - 2026-11-09
 
 ### Added
 - Security verification for the Git and SSH macros, checking that the calling
   process is the expected executable.
 - Support for `ssh-add` as an SSH macro caller.
+
+### Changed
+- Trusted executable validation now lives in the `Security` class; the
+  standalone `trusted_executable.hpp` header was removed.
 
 ### Security
 - Git and SSH helpers accept only root-owned executables without group/other

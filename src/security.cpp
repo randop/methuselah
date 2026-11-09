@@ -1,6 +1,8 @@
-#include "methuselah/security.hpp"
+#include "config.h"
+
 #include "methuselah/git_helper.hpp"
 #include "methuselah/process_info.hpp"
+#include "methuselah/security.hpp"
 #include "methuselah/ssh_helper.hpp"
 
 #include <spdlog/spdlog.h>
@@ -130,6 +132,97 @@ SecurityVerificationResult Security::verify_git() const {
   }
   return same ? SecurityVerificationResult::passed
               : SecurityVerificationResult::failed;
+}
+
+SecurityVerificationResult Security::verify_gpg() const {
+  const auto caller = ProcessInfo::caller();
+  if (!caller) {
+    SPDLOG_TRACE("faulted: gpg no caller");
+    return SecurityVerificationResult::faulted;
+  }
+  SPDLOG_TRACE("gpg caller cmdline: {}", caller->cmdline);
+
+  const bool hasExe = caller->exe != "<unavailable>";
+  std::filesystem::path callerPath;
+  std::filesystem::path argv0Path;
+  std::error_code ec;
+
+  if (hasExe) {
+    SPDLOG_TRACE("caller: {}", caller->exe);
+
+    // Resolve the caller once so symlinked install locations compare equal.
+    callerPath = std::filesystem::weakly_canonical(caller->exe, ec);
+    if (ec) {
+      report(*caller, "caller");
+      return SecurityVerificationResult::faulted;
+    }
+  } else {
+    // gpg-agent marks itself non-dumpable, so /proc/<pid>/exe is hidden even
+    // from the same user. Its command line still names the started program.
+    const auto end = caller->cmdline.find(' ');
+    SPDLOG_TRACE("gpg caller: {}", caller->cmdline);
+    const std::string argv0 = caller->cmdline.substr(0, end);
+    if (argv0.empty()) {
+      SPDLOG_TRACE("faulted: gpg caller cmdline empty");
+      return SecurityVerificationResult::faulted;
+    }
+    argv0Path = argv0;
+    SPDLOG_TRACE("caller (exe unavailable): {}", caller->cmdline);
+    SPDLOG_TRACE("gpg caller argv0: {}", argv0Path.string());
+    const auto binary = Security::trusted_executable(
+        std::filesystem::path("/usr/bin/gpg-agent"));
+    const bool same = std::filesystem::equivalent(argv0Path, *binary, ec);
+    if (!ec && same) {
+      SPDLOG_TRACE("gpg caller argv0 passed match");
+      return SecurityVerificationResult::passed;
+    }
+    SPDLOG_TRACE("gpg caller argv0 failure match");
+  }
+
+  // gpg-agent normally launches pinentry, but accept the GPG command-line
+  // executables too in case they are configured to invoke it directly.
+  constexpr const char *kGpgExecutables[] = {"gpg-agent", "gpg", "gpg2"};
+  bool foundTrusted = false;
+  for (const char *name : kGpgExecutables) {
+    const auto binary =
+        Security::trusted_executable(std::filesystem::path("/usr/bin") / name);
+    if (!binary) {
+      continue;
+    }
+    foundTrusted = true;
+
+    SPDLOG_TRACE("{}: {}", name, binary->string());
+
+    if (hasExe) {
+      const bool same = std::filesystem::equivalent(callerPath, *binary, ec);
+      if (ec) {
+        return SecurityVerificationResult::faulted;
+      }
+      if (same) {
+        return SecurityVerificationResult::passed;
+      }
+      continue;
+    }
+
+    if (argv0Path.is_absolute()) {
+      const auto trustedArg = Security::trusted_executable(argv0Path);
+      if (!trustedArg) {
+        return SecurityVerificationResult::failed;
+      }
+      const bool same = std::filesystem::equivalent(*trustedArg, *binary, ec);
+      if (ec) {
+        return SecurityVerificationResult::faulted;
+      }
+      if (same) {
+        return SecurityVerificationResult::passed;
+      }
+    } else if (argv0Path.filename() == binary->filename()) {
+      return SecurityVerificationResult::passed;
+    }
+  }
+
+  return foundTrusted ? SecurityVerificationResult::failed
+                      : SecurityVerificationResult::faulted;
 }
 
 SecurityVerificationResult Security::verify_ssh() const {
