@@ -1,0 +1,185 @@
+#include "methuselah/security.hpp"
+#include "methuselah/git_helper.hpp"
+#include "methuselah/process_info.hpp"
+#include "methuselah/ssh_helper.hpp"
+
+#include <spdlog/spdlog.h>
+
+#include <filesystem>
+#include <iostream>
+#include <optional>
+#include <string>
+
+#include <sys/stat.h>
+#include <unistd.h>
+
+namespace methuselah {
+
+namespace {
+
+void report(const ProcessInfo::Entry &e, const char *label) {
+  std::cerr << label << ": pid " << e.pid << " (ppid " << e.ppid << ")\n"
+            << "  exe:     " << e.exe << "\n"
+            << "  cmdline: " << e.cmdline << "\n";
+}
+
+} // namespace
+
+std::optional<std::filesystem::path>
+Security::trusted_executable(const std::filesystem::path &candidate) {
+  if (!candidate.is_absolute()) {
+    return std::nullopt;
+  }
+
+  std::filesystem::path resolved = "/";
+  auto remaining = candidate.relative_path();
+  unsigned links = 0;
+  struct stat info{};
+  if (::lstat("/", &info) != 0 || info.st_uid != 0 ||
+      (info.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+    return std::nullopt;
+  }
+
+  while (!remaining.empty()) {
+    const auto component = *remaining.begin();
+    std::filesystem::path tail;
+    auto it = remaining.begin();
+    for (++it; it != remaining.end(); ++it) {
+      tail /= *it;
+    }
+    remaining = tail;
+    if (component == ".") {
+      continue;
+    }
+    if (component == "..") {
+      resolved = resolved.parent_path();
+      continue;
+    }
+
+    const auto next = resolved / component;
+    if (::lstat(next.c_str(), &info) != 0 || info.st_uid != 0) {
+      return std::nullopt;
+    }
+    if (S_ISLNK(info.st_mode)) {
+      if (++links > 40) {
+        return std::nullopt;
+      }
+      std::error_code ec;
+      const auto target = std::filesystem::read_symlink(next, ec);
+      if (ec) {
+        return std::nullopt;
+      }
+      if (target.is_absolute()) {
+        resolved = "/";
+      }
+      remaining = remaining.empty() ? target.relative_path()
+                                    : target.relative_path() / remaining;
+      continue;
+    }
+    if ((info.st_mode & (S_IWGRP | S_IWOTH)) != 0 ||
+        (!remaining.empty() && !S_ISDIR(info.st_mode))) {
+      return std::nullopt;
+    }
+    resolved = next;
+  }
+
+  if (::stat(resolved.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
+      ::access(resolved.c_str(), X_OK) != 0) {
+    return std::nullopt;
+  }
+  return resolved;
+}
+
+SecurityVerificationResult Security::verify_git() const {
+  const auto gitHttp = GitHelper::locateRemoteHttp();
+  if (!gitHttp) {
+    return SecurityVerificationResult::faulted;
+  }
+
+  const auto caller = ProcessInfo::caller();
+  if (!caller) {
+    std::cerr << "caller: unavailable\n";
+    return SecurityVerificationResult::faulted;
+  }
+
+  SPDLOG_TRACE("caller: {}", caller->exe);
+  SPDLOG_TRACE("githttp: {}", gitHttp->string());
+
+  if (caller->exe == "<unavailable>") {
+    return SecurityVerificationResult::faulted;
+  }
+
+  // Resolve both sides so symlinked install locations compare equal.
+  std::error_code ec;
+  const std::string callerExe =
+      std::filesystem::weakly_canonical(caller->exe, ec).string();
+  if (ec) {
+    report(*caller, "caller");
+    return SecurityVerificationResult::faulted;
+  }
+
+  const std::string helperExe =
+      std::filesystem::weakly_canonical(*gitHttp, ec).string();
+  if (ec) {
+    return SecurityVerificationResult::faulted;
+  }
+
+  const bool same = std::filesystem::equivalent(callerExe, helperExe, ec);
+  if (ec) {
+    return SecurityVerificationResult::faulted;
+  }
+  return same ? SecurityVerificationResult::passed
+              : SecurityVerificationResult::failed;
+}
+
+SecurityVerificationResult Security::verify_ssh() const {
+  const auto sshBinary = SSHhelper::locateBinary();
+  if (!sshBinary) {
+    return SecurityVerificationResult::faulted;
+  }
+
+  const auto caller = ProcessInfo::caller();
+  if (!caller || caller->exe == "<unavailable>") {
+    return SecurityVerificationResult::faulted;
+  }
+
+  SPDLOG_TRACE("caller: {}", caller->exe);
+  SPDLOG_TRACE("ssh: {}", sshBinary->string());
+
+  // Resolve both sides so symlinked install locations compare equal.
+  std::error_code ec;
+  const auto callerPath = std::filesystem::weakly_canonical(caller->exe, ec);
+  if (ec) {
+    return SecurityVerificationResult::faulted;
+  }
+
+  const auto sshPath = std::filesystem::weakly_canonical(*sshBinary, ec);
+  if (ec) {
+    return SecurityVerificationResult::faulted;
+  }
+
+  const bool same = std::filesystem::equivalent(callerPath, sshPath, ec);
+  if (ec) {
+    return SecurityVerificationResult::faulted;
+  }
+  if (same) {
+    return SecurityVerificationResult::passed;
+  }
+
+  const auto sshAdd = SSHhelper::locateBinary("ssh-add");
+  if (!sshAdd) {
+    return SecurityVerificationResult::faulted;
+  }
+  const auto sshAddPath = std::filesystem::weakly_canonical(*sshAdd, ec);
+  if (ec) {
+    return SecurityVerificationResult::faulted;
+  }
+  const bool sameAdd = std::filesystem::equivalent(callerPath, sshAddPath, ec);
+  if (ec) {
+    return SecurityVerificationResult::faulted;
+  }
+  return sameAdd ? SecurityVerificationResult::passed
+                 : SecurityVerificationResult::failed;
+}
+
+} // namespace methuselah
