@@ -12,10 +12,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   process is the expected executable.
 - Support for `ssh-add` as an SSH macro caller.
 
-### Changed
-- Trusted executable validation now lives in the `Security` class; the
-  standalone `trusted_executable.hpp` header was removed.
-
 ### Security
 - Git and SSH helpers accept only root-owned executables without group/other
   write access.
