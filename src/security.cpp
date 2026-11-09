@@ -76,6 +76,9 @@ SecurityVerificationResult Security::verify_ssh() const {
     return SecurityVerificationResult::faulted;
   }
 
+  SPDLOG_TRACE("caller: {}", caller->exe);
+  SPDLOG_TRACE("ssh: {}", sshBinary->string());
+
   // Resolve both sides so symlinked install locations compare equal.
   std::error_code ec;
   const auto callerPath = std::filesystem::weakly_canonical(caller->exe, ec);
