@@ -9,15 +9,10 @@
 #include <iostream>
 #include <optional>
 #include <string>
-#include <string_view>
 
 namespace methuselah {
 
 namespace {
-
-inline bool isequals(std::string_view a, std::string_view b) noexcept {
-  return a == b;
-}
 
 void report(const ProcessInfo::Entry &e, const char *label) {
   std::cerr << label << ": pid " << e.pid << " (ppid " << e.ppid << ")\n"
@@ -61,8 +56,12 @@ SecurityVerificationResult Security::verify_git() const {
     return SecurityVerificationResult::faulted;
   }
 
-  return isequals(callerExe, helperExe) ? SecurityVerificationResult::passed
-                                        : SecurityVerificationResult::failed;
+  const bool same = std::filesystem::equivalent(callerExe, helperExe, ec);
+  if (ec) {
+    return SecurityVerificationResult::faulted;
+  }
+  return same ? SecurityVerificationResult::passed
+              : SecurityVerificationResult::failed;
 }
 
 SecurityVerificationResult Security::verify_ssh() const {
@@ -91,9 +90,28 @@ SecurityVerificationResult Security::verify_ssh() const {
     return SecurityVerificationResult::faulted;
   }
 
-  return isequals(callerPath.string(), sshPath.string())
-             ? SecurityVerificationResult::passed
-             : SecurityVerificationResult::failed;
+  const bool same = std::filesystem::equivalent(callerPath, sshPath, ec);
+  if (ec) {
+    return SecurityVerificationResult::faulted;
+  }
+  if (same) {
+    return SecurityVerificationResult::passed;
+  }
+
+  const auto sshAdd = SSHhelper::locateBinary("ssh-add");
+  if (!sshAdd) {
+    return SecurityVerificationResult::faulted;
+  }
+  const auto sshAddPath = std::filesystem::weakly_canonical(*sshAdd, ec);
+  if (ec) {
+    return SecurityVerificationResult::faulted;
+  }
+  const bool sameAdd = std::filesystem::equivalent(callerPath, sshAddPath, ec);
+  if (ec) {
+    return SecurityVerificationResult::faulted;
+  }
+  return sameAdd ? SecurityVerificationResult::passed
+                 : SecurityVerificationResult::failed;
 }
 
 } // namespace methuselah

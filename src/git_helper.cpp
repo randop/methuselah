@@ -1,4 +1,5 @@
 #include "methuselah/git_helper.hpp"
+#include "methuselah/trusted_executable.hpp"
 
 #include <cctype>
 #include <cerrno>
@@ -11,8 +12,6 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-extern char **environ;
 
 namespace methuselah {
 namespace {
@@ -106,7 +105,11 @@ GitHelper::runGitExecPath(std::string_view gitExecutable) {
     return std::nullopt;
   }
 
-  const std::string executable(gitExecutable);
+  const auto trusted = detail::trustedExecutable(Path(gitExecutable));
+  if (!trusted) {
+    return std::nullopt;
+  }
+  const std::string executable = trusted->string();
 
   int pipeFd[2];
   if (::pipe(pipeFd) == -1) {
@@ -149,8 +152,10 @@ GitHelper::runGitExecPath(std::string_view gitExecutable) {
   char *argv[] = {const_cast<char *>(executable.c_str()), option, nullptr};
 
   pid_t child = -1;
-  rc = ::posix_spawnp(&child, executable.c_str(), &actions, nullptr, argv,
-                      environ);
+  char locale[] = "LC_ALL=C";
+  char *environment[] = {locale, nullptr};
+  rc = ::posix_spawn(&child, executable.c_str(), &actions, nullptr, argv,
+                     environment);
 
   ::posix_spawn_file_actions_destroy(&actions);
   ::close(pipeFd[1]);

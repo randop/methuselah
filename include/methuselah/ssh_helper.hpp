@@ -12,7 +12,7 @@ public:
 
   SSHhelper() = default;
 
-  // Finds an executable named `name` on PATH. Returns its canonical path.
+  // Finds a trusted root-owned executable in /usr/bin, resolving symlinks.
   [[nodiscard]] static std::optional<Path>
   locateBinary(std::string_view name = "ssh");
 };
