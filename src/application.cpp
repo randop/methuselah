@@ -11,6 +11,7 @@
 #include "methuselah/path.hpp"
 #include "methuselah/pinentry_server.hpp"
 #include "methuselah/secure_memory.hpp"
+#include "methuselah/security.hpp"
 #include "methuselah/signal_guard.hpp"
 #include "methuselah/ui_session.hpp"
 
@@ -199,6 +200,7 @@ int Application::run(int argc, char **argv) {
   }
 
   Logger logger;
+  Security security;
   SignalGuard signals;
   InstanceLock lock;
 
@@ -218,6 +220,14 @@ int Application::run(int argc, char **argv) {
     PinentryServer server("gpg credentials", kDefaultMessage);
     return server.run();
   } else if (macro == Macro::Git) {
+
+    auto svr = security.verify_git();
+    if (svr != SecurityVerificationResult::passed) {
+      std::cerr << "Error: git macro security verification failure or faulted"
+                << std::endl;
+      return EXIT_FAILURE;
+    }
+
     const GitPredicate predicate = GitPredicate::read_from_stdin();
     return run_git_flow(predicate);
   } else if (macro == Macro::Dummy) {
