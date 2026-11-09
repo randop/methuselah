@@ -1,6 +1,7 @@
 #include "methuselah/security.hpp"
 #include "methuselah/git_helper.hpp"
 #include "methuselah/process_info.hpp"
+#include "methuselah/ssh_helper.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -62,6 +63,34 @@ SecurityVerificationResult Security::verify_git() const {
 
   return isequals(callerExe, helperExe) ? SecurityVerificationResult::passed
                                         : SecurityVerificationResult::failed;
+}
+
+SecurityVerificationResult Security::verify_ssh() const {
+  const auto sshBinary = SSHhelper::locateBinary();
+  if (!sshBinary) {
+    return SecurityVerificationResult::faulted;
+  }
+
+  const auto caller = ProcessInfo::caller();
+  if (!caller || caller->exe == "<unavailable>") {
+    return SecurityVerificationResult::faulted;
+  }
+
+  // Resolve both sides so symlinked install locations compare equal.
+  std::error_code ec;
+  const auto callerPath = std::filesystem::weakly_canonical(caller->exe, ec);
+  if (ec) {
+    return SecurityVerificationResult::faulted;
+  }
+
+  const auto sshPath = std::filesystem::weakly_canonical(*sshBinary, ec);
+  if (ec) {
+    return SecurityVerificationResult::faulted;
+  }
+
+  return isequals(callerPath.string(), sshPath.string())
+             ? SecurityVerificationResult::passed
+             : SecurityVerificationResult::failed;
 }
 
 } // namespace methuselah

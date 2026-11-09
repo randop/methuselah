@@ -106,6 +106,7 @@ sources = files(
     'src/pinentry_server.cpp',
     'src/process_info.cpp',
     'src/security.cpp',
+    'src/ssh_helper.cpp',
     'src/signal_guard.cpp',
     'src/ui_session.cpp',
 )

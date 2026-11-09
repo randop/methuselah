@@ -233,6 +233,14 @@ int Application::run(int argc, char **argv) {
   } else if (macro == Macro::Dummy) {
     return run_dummy();
   } else if (macro == Macro::Ssh) {
+
+    auto svr = security.verify_ssh();
+    if (svr != SecurityVerificationResult::passed) {
+      std::cerr << "Error: ssh macro security verification failure or faulted"
+                << std::endl;
+      return EXIT_FAILURE;
+    }
+
     return run_ssh_flow();
   }
   return EXIT_FAILURE;

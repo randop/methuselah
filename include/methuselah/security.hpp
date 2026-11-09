@@ -20,6 +20,7 @@ public:
   Security &operator=(Security &&) = delete;
 
   [[nodiscard]] SecurityVerificationResult verify_git() const;
+  [[nodiscard]] SecurityVerificationResult verify_ssh() const;
 };
 
 } // namespace methuselah
