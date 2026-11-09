@@ -1,5 +1,5 @@
 #include "methuselah/ssh_helper.hpp"
-#include "methuselah/trusted_executable.hpp"
+#include "methuselah/security.hpp"
 
 namespace methuselah {
 
@@ -8,7 +8,7 @@ std::optional<SSHhelper::Path> SSHhelper::locateBinary(std::string_view name) {
       name.find('\0') != std::string_view::npos) {
     return std::nullopt;
   }
-  return detail::trustedExecutable(Path("/usr/bin") / std::string(name));
+  return Security::trusted_executable(Path("/usr/bin") / std::string(name));
 }
 
 } // namespace methuselah

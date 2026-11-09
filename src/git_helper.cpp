@@ -1,5 +1,5 @@
 #include "methuselah/git_helper.hpp"
-#include "methuselah/trusted_executable.hpp"
+#include "methuselah/security.hpp"
 
 #include <cctype>
 #include <cerrno>
@@ -105,7 +105,7 @@ GitHelper::runGitExecPath(std::string_view gitExecutable) {
     return std::nullopt;
   }
 
-  const auto trusted = detail::trustedExecutable(Path(gitExecutable));
+  const auto trusted = Security::trusted_executable(Path(gitExecutable));
   if (!trusted) {
     return std::nullopt;
   }
