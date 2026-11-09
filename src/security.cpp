@@ -171,10 +171,12 @@ SecurityVerificationResult Security::verify_gpg() const {
     SPDLOG_TRACE("gpg caller argv0: {}", argv0Path.string());
     const auto binary = Security::trusted_executable(
         std::filesystem::path("/usr/bin/gpg-agent"));
-    const bool same = std::filesystem::equivalent(argv0Path, *binary, ec);
-    if (!ec && same) {
-      SPDLOG_TRACE("gpg caller argv0 passed match");
-      return SecurityVerificationResult::passed;
+    if (binary) {
+      const bool same = std::filesystem::equivalent(argv0Path, *binary, ec);
+      if (!ec && same) {
+        SPDLOG_TRACE("gpg caller argv0 passed match");
+        return SecurityVerificationResult::passed;
+      }
     }
     SPDLOG_TRACE("gpg caller argv0 failure match");
   }
@@ -216,8 +218,6 @@ SecurityVerificationResult Security::verify_gpg() const {
       if (same) {
         return SecurityVerificationResult::passed;
       }
-    } else if (argv0Path.filename() == binary->filename()) {
-      return SecurityVerificationResult::passed;
     }
   }
 
