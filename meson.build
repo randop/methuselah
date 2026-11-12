@@ -59,12 +59,28 @@ boost_dep = dependency(
     modules: ['filesystem'],
 )
 
+# Detect whether the compiler supports C++23 std::format
+cxx = meson.get_compiler('cpp')
+have_std_format = cxx.compiles('''
+  #include <format>
+  int main() {
+    auto s = std::format("{}", 42);
+    return s.empty() ? 1 : 0;
+  }
+''', name: 'C++23 std::format support', args: ['-std=c++23'])
+
+if not have_std_format
+  warning('Compiler does not support C++23 std::format – disabling spdlog std_format')
+endif
+
+fmt_dep = dependency('fmt', version: '>=12.0.0', fallback: ['fmt', 'fmt_dep'])
+
 spdlog_dep = dependency(
     'spdlog',
     version: '>=1.17',
     default_options: [
         'compile_library=false',
-        'std_format=enabled',
+        'std_format=' + (have_std_format ? 'enabled' : 'disabled'),
     ],
 )
 
