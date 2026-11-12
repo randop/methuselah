@@ -138,6 +138,9 @@ fi
 export CMAKE_PREFIX_PATH="${OPT_PREFIX}/libassuan/current:${CMAKE_PREFIX_PATH}"
 export PKG_CONFIG_PATH="${OPT_PREFIX}/libassuan/current/lib/pkgconfig:${PKG_CONFIG_PATH}"
 
+# Adjust PATH to avoid system libgpg-error conflicts
+export PATH="${OPT_PREFIX}/libgpg-error/current/bin:$PATH"
+
 # ---------------------------------------------------------------------------
 # gpgme 2.2.0
 # ---------------------------------------------------------------------------
