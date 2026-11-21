@@ -186,10 +186,46 @@ export CMAKE_PREFIX_PATH="${OPT_PREFIX}/gpgme/current:${CMAKE_PREFIX_PATH}"
 export PKG_CONFIG_PATH="${OPT_PREFIX}/gpgme/current/lib/pkgconfig:${PKG_CONFIG_PATH}"
 
 # ---------------------------------------------------------------------------
+# libsodium 1.0.22
+# ---------------------------------------------------------------------------
+LIBSODIUM_VERSION=1.0.22
+LIBSODIUM_TAG=1.0.22-RELEASE
+if [ ! -f "${OPT_PREFIX}/libsodium/current/lib/libsodium.a" ]; then
+  echo "Compiling libsodium ${LIBSODIUM_VERSION} ..."
+  mkdir -p ${OPT_PREFIX}/libsodium/current
+  rm -rf ${OPT_PREFIX}/libsodium/current/*
+  rm -rf ${OPT_PREFIX}/libsodium/${LIBSODIUM_VERSION}
+  git clone -b ${LIBSODIUM_TAG} https://github.com/jedisct1/libsodium.git \
+    ${OPT_PREFIX}/libsodium/${LIBSODIUM_VERSION}
+  rm -rf ${OPT_PREFIX}/libsodium/${LIBSODIUM_VERSION}/.git
+  rm -rf ${OPT_PREFIX}/libsodium/${LIBSODIUM_VERSION}/.github
+  cd ${OPT_PREFIX}/libsodium/${LIBSODIUM_VERSION}
+  ./autogen.sh
+  ./configure \
+    --prefix=${OPT_PREFIX}/libsodium/current \
+    --enable-static \
+    --disable-shared
+  make -j$(nproc)
+  make install
+  rm -f ${LOCAL_PKGCONFIG}/libsodium.pc
+  echo "Checking compiled libsodium..." &&
+    file ${OPT_PREFIX}/libsodium/current/lib/libsodium.a
+else
+  echo "libsodium: OK"
+fi
+
+if [ ! -f "${LOCAL_PKGCONFIG}/libsodium.pc" ]; then
+  ln -sv ${OPT_PREFIX}/libsodium/current/lib/pkgconfig/libsodium.pc \
+    ${LOCAL_PKGCONFIG}/libsodium.pc
+fi
+export CMAKE_PREFIX_PATH="${OPT_PREFIX}/libsodium/current:${CMAKE_PREFIX_PATH}"
+export PKG_CONFIG_PATH="${OPT_PREFIX}/libsodium/current/lib/pkgconfig:${PKG_CONFIG_PATH}"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== GPG stack ready ==="
+echo "=== methuselah dependencies ready ==="
 echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
 echo "CMAKE_PREFIX_PATH: $CMAKE_PREFIX_PATH"
 echo ""
@@ -197,8 +233,10 @@ echo "Versions (pkg-config):"
 pkg-config --modversion gpg-error 2>/dev/null || echo "  gpg-error: (not found)"
 pkg-config --modversion libassuan 2>/dev/null || echo "  libassuan: (not found)"
 pkg-config --modversion gpgme 2>/dev/null || echo "  gpgme: (not found)"
+pkg-config --modversion libsodium 2>/dev/null || echo "  libsodium: (not found)"
 echo ""
 echo "Static libraries:"
 ls -1 ${OPT_PREFIX}/libgpg-error/current/lib/libgpg-error.a \
   ${OPT_PREFIX}/libassuan/current/lib/libassuan.a \
-  ${OPT_PREFIX}/gpgme/current/lib/libgpgme.a 2>/dev/null || true
+  ${OPT_PREFIX}/gpgme/current/lib/libgpgme.a \
+  ${OPT_PREFIX}/libsodium/current/lib/libsodium.a 2>/dev/null || true

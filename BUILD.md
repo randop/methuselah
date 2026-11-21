@@ -14,6 +14,7 @@ apt install \
   libgpgme-dev \
   libgpg-error-dev \
   libassuan-dev \
+  libsodium-dev \
   libasound2-dev \
   libx11-dev \
   libgl-dev \
@@ -34,6 +35,7 @@ pacman -Syy \
   gpgme \
   libxi \
   libassuan \
+  libsodium \
   xorg-xrandr \
   libxinerama \
   libxcursor

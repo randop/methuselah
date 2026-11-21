@@ -11,8 +11,11 @@ namespace {
 gpgme_error_t passphrase_callback(void *hook, const char * /*uid_hint*/,
                                   const char * /*passphrase_info*/,
                                   int /*prev_was_bad*/, int fd) {
-  const auto *passphrase = static_cast<const std::string *>(hook);
-  std::string with_newline = *passphrase + "\n";
+  const auto *passphrase = static_cast<const SecureString *>(hook);
+  SecureString with_newline;
+  secure_reserve(with_newline, passphrase->size() + 2);
+  with_newline.assign(*passphrase);
+  with_newline.push_back('\n');
   const char *ptr = with_newline.c_str();
   std::size_t remaining = with_newline.size();
   gpgme_error_t result = GPG_ERR_NO_ERROR;
@@ -81,7 +84,7 @@ private:
 } // namespace
 
 DecryptResult GpgDecryptor::decrypt_file(const std::filesystem::path &gpg_path,
-                                         const std::string &passphrase) const {
+                                         const SecureString &passphrase) const {
   DecryptResult result;
 
   gpgme_check_version(nullptr);
@@ -96,7 +99,7 @@ DecryptResult GpgDecryptor::decrypt_file(const std::filesystem::path &gpg_path,
   gpgme_set_armor(ctx.get(), 0);
   gpgme_set_pinentry_mode(ctx.get(), GPGME_PINENTRY_MODE_LOOPBACK);
   gpgme_set_passphrase_cb(ctx.get(), passphrase_callback,
-                          const_cast<std::string *>(&passphrase));
+                          const_cast<SecureString *>(&passphrase));
 
   GpgmeData cipher;
   gpgme_error_t err = cipher.from_file(gpg_path.c_str());
@@ -121,7 +124,8 @@ DecryptResult GpgDecryptor::decrypt_file(const std::filesystem::path &gpg_path,
   gpgme_data_seek(plain.get(), 0, SEEK_SET);
   char buf[4096];
   ssize_t n = 0;
-  std::string plaintext;
+  SecureString plaintext;
+  secure_reserve(plaintext, 4096);
   while ((n = gpgme_data_read(plain.get(), buf, sizeof(buf))) > 0) {
     plaintext.append(buf, static_cast<std::size_t>(n));
   }

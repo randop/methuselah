@@ -1,5 +1,7 @@
 #pragma once
 
+#include "methuselah/secure_memory.hpp"
+
 #include <memory>
 #include <optional>
 #include <string>
@@ -27,7 +29,7 @@ public:
   static void install_debug_callback();
 
   [[nodiscard]] bool ready() const noexcept;
-  [[nodiscard]] std::optional<std::string>
+  [[nodiscard]] std::optional<SecureString>
   prompt_password(const PromptOptions &options);
 
 private:
