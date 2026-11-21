@@ -95,7 +95,7 @@ int run_git_flow(const GitPredicate &predicate) {
   }
 
   GpgDecryptor decryptor;
-  auto remembered = decryptor.decrypt_file(gpg_path, "");
+  auto remembered = decryptor.decrypt_file(gpg_path, SecureString{});
   if (remembered.ok()) {
     predicate.write_credentials(remembered.plaintext());
     return EXIT_SUCCESS;
@@ -112,7 +112,7 @@ int run_git_flow(const GitPredicate &predicate) {
   options.message = kDefaultMessage;
 
   while (!SignalGuard::received()) {
-    std::optional<std::string> password = ui.prompt_password(options);
+    std::optional<SecureString> password = ui.prompt_password(options);
     if (!password) {
       break;
     }
@@ -149,7 +149,7 @@ int run_dummy() {
   options.message = kDefaultMessage;
 
   while (!SignalGuard::received()) {
-    std::optional<std::string> password = ui.prompt_password(options);
+    std::optional<SecureString> password = ui.prompt_password(options);
     if (!password) {
       break;
     }
@@ -175,12 +175,16 @@ int run_ssh_flow() {
   options.message = kDefaultMessage;
 
   while (!SignalGuard::received()) {
-    std::optional<std::string> password = ui.prompt_password(options);
+    std::optional<SecureString> password = ui.prompt_password(options);
     if (!password) {
       break;
     }
-    std::cout << *password << std::endl;
+    password->push_back('\n');
+    const bool written = secure_write(STDOUT_FILENO, *password);
     secure_clear(*password);
+    if (!written) {
+      return EXIT_FAILURE;
+    }
     break;
   }
 

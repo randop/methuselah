@@ -296,7 +296,7 @@ void UiSession::install_debug_callback() {
 
 bool UiSession::ready() const noexcept { return impl_ && impl_->ready; }
 
-std::optional<std::string>
+std::optional<SecureString>
 UiSession::prompt_password(const PromptOptions &options) {
   if (!ready()) {
     return std::nullopt;
@@ -396,7 +396,10 @@ UiSession::prompt_password(const PromptOptions &options) {
     return std::nullopt;
   }
 
-  return std::string(password_buf.data());
+  SecureString out;
+  secure_reserve(out);
+  out.assign(password_buf.data());
+  return out;
 }
 
 } // namespace methuselah

@@ -105,7 +105,7 @@ gpg_error_t PinentryServer::Impl::on_getpin(assuan_context_t ctx) {
   options.message = dialog_message_;
   options.timeout_seconds = timeout_;
 
-  std::optional<std::string> pass = ui.prompt_password(options);
+  std::optional<SecureString> pass = ui.prompt_password(options);
   if (!pass) {
     return gpg_error(GPG_ERR_CANCELED);
   }

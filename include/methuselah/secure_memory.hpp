@@ -1,41 +1,146 @@
 #pragma once
 
+#include <sodium.h>
+
+#include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstddef>
-#include <string.h>
+#include <limits>
+#include <new>
 #include <string>
+#include <string_view>
+
+#include <unistd.h>
 
 namespace methuselah {
 
+// libsodium must be initialised before sodium_malloc()/randombytes. This is
+// idempotent and safe to call from any thread; MemoryGuard::harden() calls it
+// as well, but allocators call it too so no ordering mistake can bypass it.
+inline void sodium_ready() {
+  static const bool ok = (::sodium_init() >= 0);
+  if (!ok) {
+    throw std::bad_alloc();
+  }
+}
+
 inline void secure_clear(void *ptr, std::size_t n) noexcept {
   if (ptr != nullptr && n > 0) {
-    explicit_bzero(ptr, n);
+    ::sodium_memzero(ptr, n);
   }
+}
+
+namespace detail {
+inline void *allocate_locked(std::size_t bytes) {
+  sodium_ready();
+  void *p = ::sodium_malloc(bytes);
+  if (p == nullptr) {
+    throw std::bad_alloc();
+  }
+  // sodium_malloc() can succeed even if its internal lock attempt failed.
+  if (bytes != 0 && ::sodium_mlock(p, bytes) != 0) {
+    ::sodium_free(p);
+    throw std::bad_alloc();
+  }
+  return p;
+}
+} // namespace detail
+
+// Allocator backed by sodium_malloc(): every allocation is placed against a
+// guard page, carries a canary and is zeroed by sodium_free(). Nonempty
+// allocations must be locked; exclusion from core dumps is best effort.
+template <typename T> struct SecureAllocator {
+  using value_type = T;
+
+  SecureAllocator() noexcept = default;
+  template <typename U> SecureAllocator(const SecureAllocator<U> &) noexcept {}
+
+  [[nodiscard]] T *allocate(std::size_t n) {
+    if (n > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+      throw std::bad_alloc();
+    }
+    return static_cast<T *>(detail::allocate_locked(n * sizeof(T)));
+  }
+
+  void deallocate(T *p, std::size_t) noexcept { ::sodium_free(p); }
+
+  template <typename U> bool operator==(const SecureAllocator<U> &) const {
+    return true;
+  }
+  template <typename U> bool operator!=(const SecureAllocator<U> &) const {
+    return false;
+  }
+};
+
+// std::string whose heap buffer lives in guarded, locked memory.
+// NOTE: short strings use the SSO buffer inside the object itself, so keep
+// SecureString objects off long-lived non-secure storage and call
+// secure_clear() on them as soon as the secret is no longer needed.
+using SecureString =
+    std::basic_string<char, std::char_traits<char>, SecureAllocator<char>>;
+
+// Force the string onto the guarded heap. Strings of ~15 chars or fewer would
+// otherwise live in the inline SSO buffer inside the (non-guarded) object.
+inline void secure_reserve(SecureString &s, std::size_t n = 256) {
+  s.reserve(std::max<std::size_t>(n, 256));
+}
+
+// Write straight to a file descriptor, bypassing iostream buffers that would
+// keep an unzeroed copy of the secret. Returns false on failure.
+inline bool secure_write(int fd, std::string_view data) noexcept {
+  while (!data.empty()) {
+    const ssize_t n = ::write(fd, data.data(), data.size());
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    data.remove_prefix(static_cast<std::size_t>(n));
+  }
+  return true;
 }
 
 inline void secure_clear(std::string &s) noexcept {
   if (!s.empty()) {
-    explicit_bzero(s.data(), s.size());
+    ::sodium_memzero(s.data(), s.size());
     s.clear();
   }
 }
 
+inline void secure_clear(SecureString &s) noexcept {
+  if (!s.empty()) {
+    ::sodium_memzero(s.data(), s.size());
+  }
+  s.clear();
+}
+
+// Fixed-size secret buffer in guarded, locked memory, zeroed on creation
+// and destruction.
 template <std::size_t N> class SecureArray {
 public:
-  SecureArray() = default;
-  ~SecureArray() { secure_clear(data_.data(), data_.size()); }
+  SecureArray() {
+    data_ = static_cast<char *>(detail::allocate_locked(N));
+    ::sodium_memzero(data_, N);
+  }
+  ~SecureArray() { ::sodium_free(data_); }
 
   SecureArray(const SecureArray &) = delete;
   SecureArray &operator=(const SecureArray &) = delete;
   SecureArray(SecureArray &&) = delete;
   SecureArray &operator=(SecureArray &&) = delete;
 
-  [[nodiscard]] char *data() noexcept { return data_.data(); }
-  [[nodiscard]] const char *data() const noexcept { return data_.data(); }
+  [[nodiscard]] char *data() noexcept { return data_; }
+  [[nodiscard]] const char *data() const noexcept { return data_; }
   [[nodiscard]] int size() const noexcept { return static_cast<int>(N); }
 
+  // Make the buffer inaccessible (SIGSEGV on touch) while it is not in use.
+  void lock_access() noexcept { ::sodium_mprotect_noaccess(data_); }
+  void unlock_access() noexcept { ::sodium_mprotect_readwrite(data_); }
+
 private:
-  std::array<char, N> data_{};
+  char *data_ = nullptr;
 };
 
 } // namespace methuselah

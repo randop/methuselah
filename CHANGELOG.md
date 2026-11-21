@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-21
+
+### Security
+- Added libsodium guarded memory for secrets via `SecureString` and
+  `SecureArray`, with a canary, best effort `MADV_DONTDUMP`, and zeroing on free.
+  `sodium_malloc()` locks memory on a best effort basis and can return
+  swappable memory if the locked memory limit is exhausted. Both wrappers
+  verify locking before use and fail the allocation if locking fails.
+- Added `MemoryGuard::harden()` at startup. Disabling dumpability and core
+  files and setting `no_new_privs` are best effort: each failure emits a
+  warning and startup continues. Startup refuses a detected tracer
+  (`TracerPid`) and removes selected `LD_*` and malloc debug variables.
+- `secure_clear()` now uses `sodium_memzero()`.
+- Git credential input is parsed with `string_view`s into a guarded `SecureString`
+  (no `istringstream`/map/`substr` copies); passwords are written via `write(2)`
+  instead of `std::cout`, and the ssh macro does the same.
+- Short secrets are forced onto the guarded heap (`secure_reserve`) so they
+  never sit in the inline small-string buffer.
+
 ## [0.6.2] - 2026-11-09
 
 ### Added

@@ -32,17 +32,17 @@ public:
     return *this;
   }
 
-  void set_plaintext(std::string text) { plaintext_ = std::move(text); }
+  void set_plaintext(SecureString text) { plaintext_ = std::move(text); }
   void set_error(std::string err) { error_ = std::move(err); }
 
   [[nodiscard]] bool ok() const noexcept { return error_.empty(); }
-  [[nodiscard]] const std::string &plaintext() const noexcept {
+  [[nodiscard]] const SecureString &plaintext() const noexcept {
     return plaintext_;
   }
   [[nodiscard]] const std::string &error() const noexcept { return error_; }
 
 private:
-  std::string plaintext_;
+  SecureString plaintext_;
   std::string error_;
 };
 
@@ -50,7 +50,7 @@ class GpgDecryptor {
 public:
   [[nodiscard]] DecryptResult
   decrypt_file(const std::filesystem::path &gpg_path,
-               const std::string &passphrase) const;
+               const SecureString &passphrase) const;
 };
 
 } // namespace methuselah
