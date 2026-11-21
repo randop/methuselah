@@ -193,8 +193,8 @@ LIBSODIUM_TAG=1.0.22-RELEASE
 if [ ! -f "${OPT_PREFIX}/libsodium/current/lib/libsodium.a" ]; then
   echo "Compiling libsodium ${LIBSODIUM_VERSION} ..."
   mkdir -p ${OPT_PREFIX}/libsodium/current
-  rm -rf ${OPT_PREFIX}/libsodium/current/*
-  rm -rf ${OPT_PREFIX}/libsodium/${LIBSODIUM_VERSION}
+  rm -rf "${OPT_PREFIX}/libsodium/current/"*
+  rm -rf "${OPT_PREFIX}/libsodium/${LIBSODIUM_VERSION}"
   git clone -b ${LIBSODIUM_TAG} https://github.com/jedisct1/libsodium.git \
     ${OPT_PREFIX}/libsodium/${LIBSODIUM_VERSION}
   rm -rf ${OPT_PREFIX}/libsodium/${LIBSODIUM_VERSION}/.git

@@ -2,6 +2,7 @@
 
 #include <sodium.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstddef>
@@ -30,9 +31,25 @@ inline void secure_clear(void *ptr, std::size_t n) noexcept {
   }
 }
 
+namespace detail {
+inline void *allocate_locked(std::size_t bytes) {
+  sodium_ready();
+  void *p = ::sodium_malloc(bytes);
+  if (p == nullptr) {
+    throw std::bad_alloc();
+  }
+  // sodium_malloc() can succeed even if its internal lock attempt failed.
+  if (bytes != 0 && ::sodium_mlock(p, bytes) != 0) {
+    ::sodium_free(p);
+    throw std::bad_alloc();
+  }
+  return p;
+}
+} // namespace detail
+
 // Allocator backed by sodium_malloc(): every allocation is placed against a
-// guard page, carries a canary, is mlock()ed, excluded from core dumps
-// (MADV_DONTDUMP) and zeroed by sodium_free().
+// guard page, carries a canary and is zeroed by sodium_free(). Nonempty
+// allocations must be locked; exclusion from core dumps is best effort.
 template <typename T> struct SecureAllocator {
   using value_type = T;
 
@@ -43,12 +60,7 @@ template <typename T> struct SecureAllocator {
     if (n > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
       throw std::bad_alloc();
     }
-    sodium_ready();
-    void *p = ::sodium_malloc(n * sizeof(T));
-    if (p == nullptr) {
-      throw std::bad_alloc();
-    }
-    return static_cast<T *>(p);
+    return static_cast<T *>(detail::allocate_locked(n * sizeof(T)));
   }
 
   void deallocate(T *p, std::size_t) noexcept { ::sodium_free(p); }
@@ -61,7 +73,7 @@ template <typename T> struct SecureAllocator {
   }
 };
 
-// std::string whose heap buffer lives in guarded, locked, non-dumpable memory.
+// std::string whose heap buffer lives in guarded, locked memory.
 // NOTE: short strings use the SSO buffer inside the object itself, so keep
 // SecureString objects off long-lived non-secure storage and call
 // secure_clear() on them as soon as the secret is no longer needed.
@@ -71,7 +83,7 @@ using SecureString =
 // Force the string onto the guarded heap. Strings of ~15 chars or fewer would
 // otherwise live in the inline SSO buffer inside the (non-guarded) object.
 inline void secure_reserve(SecureString &s, std::size_t n = 256) {
-  s.reserve(n);
+  s.reserve(std::max<std::size_t>(n, 256));
 }
 
 // Write straight to a file descriptor, bypassing iostream buffers that would
@@ -104,17 +116,12 @@ inline void secure_clear(SecureString &s) noexcept {
   s.clear();
 }
 
-// Fixed-size secret buffer allocated with sodium_malloc() (guard pages,
-// canary, mlock, no core dump), filled with random garbage on creation so
-// uninitialised reads never expose stale memory, and zeroed on destruction.
+// Fixed-size secret buffer in guarded, locked memory, zeroed on creation
+// and destruction.
 template <std::size_t N> class SecureArray {
 public:
   SecureArray() {
-    sodium_ready();
-    data_ = static_cast<char *>(::sodium_malloc(N));
-    if (data_ == nullptr) {
-      throw std::bad_alloc();
-    }
+    data_ = static_cast<char *>(detail::allocate_locked(N));
     ::sodium_memzero(data_, N);
   }
   ~SecureArray() { ::sodium_free(data_); }

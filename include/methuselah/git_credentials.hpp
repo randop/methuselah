@@ -14,8 +14,8 @@ public:
   [[nodiscard]] static GitPredicate read_from_stdin();
 
   GitPredicate() = default;
-  GitPredicate(const GitPredicate &) = default;
-  GitPredicate &operator=(const GitPredicate &) = default;
+  GitPredicate(const GitPredicate &other);
+  GitPredicate &operator=(const GitPredicate &other);
   GitPredicate(GitPredicate &&) noexcept = default;
   GitPredicate &operator=(GitPredicate &&) noexcept = default;
   ~GitPredicate() { secure_clear(password_); }

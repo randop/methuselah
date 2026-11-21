@@ -4,10 +4,29 @@
 #include <cstddef>
 #include <iostream>
 #include <string_view>
+#include <utility>
 
 #include <unistd.h>
 
 namespace methuselah {
+
+GitPredicate::GitPredicate(const GitPredicate &other)
+    : capabilities_(other.capabilities_), wwwauth_(other.wwwauth_),
+      protocol_(other.protocol_), host_(other.host_), username_(other.username_) {
+  if (!other.password_.empty()) {
+    secure_reserve(password_, other.password_.size());
+    password_.assign(other.password_);
+  }
+}
+
+GitPredicate &GitPredicate::operator=(const GitPredicate &other) {
+  if (this != &other) {
+    GitPredicate copy(other);
+    secure_clear(password_);
+    *this = std::move(copy);
+  }
+  return *this;
+}
 
 GitPredicate GitPredicate::parse(std::string_view input) {
   GitPredicate predicate;
