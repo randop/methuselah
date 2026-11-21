@@ -41,10 +41,6 @@ pacman -Syy \
   libxcursor
 ```
 
-<!-- coderabbit-ai-generated:v1 -->
-
-<!-- coderabbit-ai-generated-section:v1:fce60f66e3fe4c13020a123ecebedc8bf52f35f9eaf0b410af97283b49bd1e4a -->
-
 Meson 1.0.1 or newer is required to build; `scripts/format.sh` requires
 Meson 1.5 or newer and `clang-format`.
 
@@ -64,8 +60,6 @@ libsodium 1.0.22 under `$HOME/opt/libsodium/current` with
 `PKG_CONFIG_PATH` so Meson can find the local archive through pkg-config.
 If `.build` was already configured with a different installation, recreate
 it so Meson detects the new dependency.
-
-<!-- /coderabbit-ai-generated:v1 -->
 
 Boost 1.90.0 or newer (including the Filesystem library) is required. If your
 distribution provides an older version, install it from the

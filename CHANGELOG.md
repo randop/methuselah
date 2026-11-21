@@ -8,10 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.7.0] - 2026-11-21
 
 ### Security
-<!-- coderabbit-ai-generated:v1 -->
-
-<!-- coderabbit-ai-generated-section:v1:b3156c340bdea7b00524f3f1a25a67e3517239a19af4b2c8bd948b5629dae1ce -->
-
 - Added libsodium guarded memory for secrets via `SecureString` and
   `SecureArray`, with a canary, best effort `MADV_DONTDUMP`, and zeroing on free.
   `sodium_malloc()` locks memory on a best effort basis and can return
@@ -21,8 +17,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   files and setting `no_new_privs` are best effort: each failure emits a
   warning and startup continues. Startup refuses a detected tracer
   (`TracerPid`) and removes selected `LD_*` and malloc debug variables.
-
-<!-- /coderabbit-ai-generated:v1 -->
 - `secure_clear()` now uses `sodium_memzero()`.
 - Git credential input is parsed with `string_view`s into a guarded `SecureString`
   (no `istringstream`/map/`substr` copies); passwords are written via `write(2)`
