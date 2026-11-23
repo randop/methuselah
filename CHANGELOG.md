@@ -8,56 +8,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.8.0] - 2026-11-23
 
 ### Added
-- `--macro=aws`: an AWS CLI `credential_process` helper. Credentials stay in a
-  GPG-encrypted file (`[aws:<profile>]` section in
-  `~/.config/pinentry.methuselah`) and are released only to a verified AWS
-  CLI v2, as the JSON document the CLI expects, written straight to its pipe.
-- `AwsCliVerifier`: refuses to hand over credentials unless the calling
-  process is the native `aws` binary owned by root or the `methuselah` service
-  account (matched by the inode of `/proc/<pid>/exe`, so a swapped, copied, or
-  deleted binary fails), is not traced, and has no tampering vectors:
-  - optional SHA-256 pin of the running binary in
-    `/etc/methuselah/aws-cli.sha256` (root-owned);
-  - no `LD_*`, `PYTHON*`, `MALLOC_*`, endpoint, or CA-bundle overrides in its
-    start-up environment;
-  - none of `--endpoint-url`, `--ca-bundle`, `--no-verify-ssl`, `--debug`, or
-    `configure export-credentials` in its arguments;
-  - every executable file mapping is owned by root or the service account (no
-    `/tmp` libraries, deleted files, or memfd code, apart from libffi's
-    trampoline memfd).
-- `scripts/aws.sh` installs AWS CLI v2 under `/opt/methuselah/aws-cli` for the
-  unprivileged `methuselah` system user, with read and execute access for the
-  `users` group, a root-owned launcher symlink, and a refreshed SHA-256 pin.
-- `Security::trusted_file()` (the `trusted_executable()` rules without the
-  executable bit) and `ProcessInfo::readProc()` / `ProcessInfo::argv()`.
-- `InstanceLock::Mode::wait`: concurrent `credential_process` calls queue
-  behind each other instead of exiting.
-- Unit tests (`meson test -C .build`) for the credential parser, the verifier
-  checks, and `verify()` against real child processes.
+- `--macro=aws`: an AWS CLI `credential_process` helper. Credentials stay in
+  the GPG-encrypted file mapped by the `[aws:<profile>]` section of
+  `~/.config/pinentry.methuselah` and are released only to a verified AWS CLI
+  v2 as the JSON document the CLI expects, written straight to its pipe or
+  socket. The optional argument selects the profile (`default` when omitted);
+  profile names are 1 to 64 characters from letters, digits, `_`, `-`, `.`,
+  and `@`. Setup and verification are documented in `docs/aws.md`.
+- `AwsCliVerifier`: refuses to hand over credentials unless the caller:
+  - is the native `aws` executable of a supported AWS CLI v2 installation,
+    matched by the inode of `/proc/<pid>/exe`, so a copied, renamed, swapped,
+    or deleted binary fails. Every path component and the executable are owned
+    by root or the `methuselah` service account, never the calling user, and
+    are not writable by group or others. The caller must also share the
+    helper's root and mount namespace;
+  - matches a SHA-256 digest when the root-owned
+    `/etc/methuselah/aws-cli.sha256` pin file exists. The file is a
+    `sha256sum`-style list with `#` comments and blank lines; a file that is
+    present but not root-owned, unreadable, malformed, empty, or larger than
+    64 KiB fails closed;
+  - reports no attached tracer (a snapshot only, not protection against a
+    later attachment);
+  - was not started with `--endpoint-url`, `--ca-bundle`, `--no-verify-ssl`,
+    `--debug`, `--cli-auto-prompt`, or `configure export-credentials`,
+    including unambiguous option prefixes; `--cli-auto-prompt` is refused even
+    after `--`;
+  - was not started with loader, interpreter, endpoint, model, trust-store, or
+    token-file overrides: `LD_*`, `PYTHON*`, `MALLOC_*`, `GCONV_PATH`,
+    `LOCPATH`, `NLSPATH`, `HOSTALIASES`, `AWS_ENDPOINT_URL*`, `AWS_DATA_PATH`,
+    `AWS_CA_BUNDLE`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`,
+    `AWS_CONTAINER_CREDENTIALS_FULL_URI`,
+    `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`,
+    `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+    or `SSLKEYLOGFILE`. `AWS_CLI_AUTO_PROMPT` must be unset or `off`. The
+    official bundle may set `LD_LIBRARY_PATH` to exactly its own executable
+    directory once; `LD_LIBRARY_PATH_ORIG` and any other value are refused;
+  - has a root-controlled, non-empty `HOME` set once; the `.aws` directory and
+    any `.aws/config` or `.aws/credentials` file are root-controlled too.
+    `config` has no `[plugins]` section, and neither file enables auto-prompt
+    (`cli_auto_prompt` must be unset or `off` in every profile);
+  - maps only executable files owned by root or the `methuselah` account
+    through trusted paths, apart from libffi's `/memfd:libffi` trampoline.
+    Deleted mappings other than that trampoline are refused.
+- `scripts/aws.sh` installs the official AWS CLI v2 for an unprivileged
+  `methuselah` system user on Linux x86_64 or aarch64. The bundle lives under
+  `/opt/methuselah/aws-cli`, owned by `methuselah:users` with read and execute
+  access for `users`; `/opt/methuselah`, the `/usr/local/bin/aws` and
+  `aws_completer` symlinks, and the refreshed SHA-256 pin are root-owned. The
+  script refuses to run as root or as `methuselah`, creates the service user
+  and `users` group when needed, adds the invoking account to `users`, and can
+  be rerun to update the CLI and refresh the pin.
+- `Security::trusted_file()`, `Security::trusted_directory()`, and
+  `TrustPolicy` extend the `trusted_executable()` path and ownership checks to
+  regular files and directories and to an explicit owner list.
+  `ProcessInfo::readProc()` and `ProcessInfo::argv()`,
+  `GpgDecryptor::decrypt_fd()`, and `resolve_path(..., canonicalize)` support
+  the AWS flow.
+- `InstanceLock::Mode::wait`: concurrent `credential_process` calls queue on a
+  separate lock file instead of exiting, with `SIGINT`/`SIGTERM` cancelling
+  the wait.
+- Unit tests (`meson test -C .build`) for credential parsing, argument,
+  environment, CLI-config, memory-map, pin, and hash checks, the trust policy,
+  service-account installs, `SecurityVerdict`, and `verify()` against real
+  `/proc` state from child processes. The test target is built on demand and
+  needs neither raylib nor GPG.
+- `docs/aws.md` with install, encryption, profile, CLI-home, pinning, and
+  verification guidance; the README lists AWS CLI support and links to it.
 
 ### Changed
-- `AwsCliVerifier` accepts an AWS CLI v2 installed under
-  `/opt/methuselah/aws-cli` and owned by the unprivileged `methuselah` service
-  account in addition to root-owned installations. Path components may belong
-  to root or `methuselah`, but never to the calling user, and must not be
-  writable by group or others.
-- The unknown-macro check now runs before the instance lock is taken.
+- `AwsCliVerifier` accepts root-owned AWS CLI v2 installations and
+  installations owned by the unprivileged `methuselah` service account,
+  including `/opt/methuselah/aws-cli`. Path components may belong to root or
+  `methuselah`, but never to the calling user, and must not be writable by
+  group or others.
 - `Security::verify_git()`, `verify_gpg()`, `verify_ssh()`, and `verify_aws()`
   return a `SecurityVerdict` (`std::errc` result plus a reason). Success uses
   `std::errc{}`, policy refusals use `std::errc::permission_denied`, and
   verification faults use `std::errc::io_error`. The verdict can be unpacked
   with `const auto [result, reason] = ...`. `reason` is a `std::string_view`
   that only accepts string literals, so it cannot dangle; variable detail
-  (an argument, variable, or path) moved to trace logging.
-  `AwsVerdict` and the `verify_aws(std::string *)` out-parameter are gone.
+  (an argument, variable, or path) moved to trace logging. `AwsVerdict` and the
+  `verify_aws(std::string *)` out-parameter are gone, and
+  `AwsCredentials::parse()` returns an `AwsParseResult` in the same shape.
+- The AWS macro decrypts from the already-open, verified credential file
+  descriptor and rewinds it for retries, rather than reopening the path. The
+  final path component may not be a symlink.
+- The unknown-macro check now runs before the instance lock is taken.
 
 ### Security
 - The AWS macro re-verifies the caller after the passphrase prompt, right
-  before writing credentials, and refuses a stdout that is not a pipe.
+  before writing credentials. It checks that the parent is still the verified
+  caller, aborts if a signal arrived, and refuses a stdout that is not a pipe
+  or socket.
 - The encrypted credentials file must be a regular file owned by the user and
-  not writable by group or others.
-- Expired credentials, unknown keys, duplicate keys, and values outside the
-  characters AWS uses are rejected; errors never include secret values.
+  not writable by group or others; a symlink in its final path component is
+  refused.
+- Credentials accept both the short names and the `~/.aws/credentials`
+  spellings. Unknown and duplicate keys are rejected. Access keys, secret
+  keys, and session tokens are length- and character-checked; `session_token`
+  requires an `expiration` in `YYYY-MM-DDTHH:MM:SSZ` UTC form that is still in
+  the future. Errors never include secret values.
+- Credentials are parsed into guarded `SecureString`s, and the JSON document
+  is assembled and written with the secure memory helpers rather than
+  `std::cout`.
 - A failed, cancelled, or contended AWS request exits non-zero with no output;
   it never reports an empty success.
 
