@@ -510,7 +510,7 @@ SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
     return verdict(std::errc::io_error, "no AWS CLI parent process");
   }
 
-  // Tracer: a same-uid debugger could rewrite the CLI after it passes.
+  // Snapshot only: this check cannot prevent a later ptrace attachment.
   const auto status = ProcessInfo::readProc(pid, "status");
   if (!status) {
     return verdict(std::errc::io_error, "cannot read caller status");
@@ -584,14 +584,27 @@ SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
     if (pinFd < 0) {
       return verdict(std::errc::io_error, "cannot open AWS CLI pin file");
     }
+    constexpr std::size_t kMaxPinBytes = 1U << 16;
     std::string text;
     char buffer[1024];
     ssize_t n;
-    while ((n = ::read(pinFd, buffer, sizeof(buffer))) > 0 &&
-           text.size() < (1U << 16)) {
+    for (;;) {
+      n = ::read(pinFd, buffer, sizeof(buffer));
+      if (n < 0 && errno == EINTR) {
+        continue;
+      }
+      if (n <= 0 || static_cast<std::size_t>(n) > kMaxPinBytes - text.size()) {
+        break;
+      }
       text.append(buffer, static_cast<std::size_t>(n));
     }
     ::close(pinFd);
+    if (n < 0) {
+      return verdict(std::errc::io_error, "cannot read AWS CLI pin file");
+    }
+    if (n > 0) {
+      return verdict(std::errc::io_error, "AWS CLI pin file is too large");
+    }
     const auto pins = parse_pin_file(text);
     if (!pins) {
       return verdict(std::errc::io_error,

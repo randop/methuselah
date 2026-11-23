@@ -55,11 +55,24 @@ the installed helper:
 credential_process = /usr/local/bin/methuselah --macro=aws prod
 ```
 
-Run the CLI as your normal user with that directory as its home:
-`HOME=/etc/methuselah/aws-home aws --profile prod …`. Keep static keys out of
-that home's `.aws/credentials` and leave all plugin configuration out of
-its `.aws/config`. The helper still finds its own configuration and encrypted
-file in your account's home directory.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:f04475c61ef0cdc78ae01a58337d2090a4aac33ccc140306a3a4c6ac2acaf42a -->
+
+Run the CLI as your normal user with the root-controlled AWS home and the
+GnuPG home that holds the private key for step 1:
+
+```bash
+GNUPGHOME="${GNUPGHOME:-$HOME/.gnupg}" HOME=/etc/methuselah/aws-home aws --profile prod …
+```
+
+Set `GNUPGHOME` to the absolute path of your keyring directory if you keep it
+elsewhere. The helper inherits it for GPGME decryption and still finds its own
+configuration and encrypted file in your account's home directory. Keep
+static keys out of the AWS home's `.aws/credentials` and leave plugin
+configuration out of its `.aws/config`.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 **4. Optional but recommended: pin the CLI binary.** Pinning detects an
 `aws` that was modified in place. The install script writes this pin for you;
@@ -72,7 +85,7 @@ sha256sum "$(readlink -f /usr/local/bin/aws)" | sudo tee /etc/methuselah/aws-cli
 
 <!-- coderabbit-ai-generated:v1 -->
 
-<!-- coderabbit-ai-generated-section:v1:6a3cb1f5030667c7ab6e8ffa5546c1990201e6fdac418bc66f1a7da96a4c464d -->
+<!-- coderabbit-ai-generated-section:v1:a1223a11685f33a47331bac23728bd3d02de3a2c1595154a7849c589d853a6d8 -->
 
 ### What is verified
 
@@ -86,7 +99,7 @@ The helper prints nothing and exits non-zero unless the caller:
   matched by inode against the running process (copies, renamed or replaced
   binaries fail);
 - matches a pinned SHA-256, when `/etc/methuselah/aws-cli.sha256` exists;
-- has no tracer attached;
+- reports no attached tracer when the helper reads the caller's `TracerPid`;
 - was not started with `--endpoint-url`, `--ca-bundle`, `--no-verify-ssl`,
   `--debug`, `--cli-auto-prompt`, or `configure export-credentials`;
 - was not started with loader overrides (the official Linux bundle's
@@ -99,6 +112,7 @@ The helper prints nothing and exits non-zero unless the caller:
   `off` in either file; `AWS_CLI_AUTO_PROMPT` must also be unset or `off`;
 - maps only trusted files as executable code, apart from libffi trampolines.
 
+The tracer check is a snapshot and does not prevent a later attachment.
 
 <!-- /coderabbit-ai-generated:v1 -->
 The check runs before the passphrase prompt and again just before the

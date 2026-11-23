@@ -91,10 +91,10 @@ void test_credentials() {
     CHECK(ec == std::errc{});
     CHECK(credentials.has_session_token());
     const std::string json(credentials.to_credential_process_json());
-    CHECK(json.find("\"SessionToken\":\"") != std::string::npos);
-    CHECK(json.find("\"Expiration\":\"2030-01-01T00:00:00Z\"") !=
-          std::string::npos);
-    CHECK(json.back() == '\n');
+    CHECK(json == std::string("{\"Version\":1,\"AccessKeyId\":\"") + kAccess +
+                      "\",\"SecretAccessKey\":\"" + kSecret +
+                      "\",\"SessionToken\":\"" + kToken +
+                      "\",\"Expiration\":\"2030-01-01T00:00:00Z\"}\n");
   }
 
   {

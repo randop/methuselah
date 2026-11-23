@@ -22,7 +22,7 @@ namespace methuselah {
 //     owned by root or the `methuselah` service account, none of them writable
 //     by group or others.
 //  2. Optionally, its SHA-256 matches a root-owned pin list.
-//  3. No tracer is attached (no ptrace injection).
+//  3. No tracer is reported when the caller's TracerPid is checked.
 //  4. Its argv does not redirect, weaken, or dump what it does with
 //     credentials (--endpoint-url, --no-verify-ssl, --debug,
 //     `configure export-credentials`, ...).
