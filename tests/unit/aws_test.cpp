@@ -182,6 +182,11 @@ void test_environment() {
                                  bundle) == "LD_LIBRARY_PATH");
   CHECK(V::forbidden_environment(bundled + "LD_AUDIT=/tmp/x.so", bundle) ==
         "LD_AUDIT");
+  CHECK(V::forbidden_environment(clean + "AWS_DATA_PATH=/tmp/models" + '\0') ==
+        "AWS_DATA_PATH");
+  CHECK(V::forbidden_environment(
+            bundled + "AWS_DATA_PATH=/tmp/models" + '\0', bundle) ==
+        "AWS_DATA_PATH");
 
   // Names must match; look-alikes and values must not.
   CHECK(!V::forbidden_environment(std::string("MY_LD_PRELOAD=1") + '\0')

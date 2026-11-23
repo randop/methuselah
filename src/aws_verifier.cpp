@@ -46,7 +46,7 @@ std::string proc_link(pid_t pid, const char *leaf) {
 // Exact names (or "NAME*" prefixes) that must not be present in the AWS CLI's
 // start-up environment. Each either injects code into the process or lets
 // the caller steer where, or over which trust store, credentials are sent.
-constexpr std::array<std::string_view, 19> kForbiddenEnvironment = {
+constexpr std::array<std::string_view, 20> kForbiddenEnvironment = {
     "LD_*",              // loader injection: LD_PRELOAD, LD_LIBRARY_PATH, ...
     "PYTHON*",           // interpreter hooks: PYTHONPATH, PYTHONSTARTUP, ...
     "MALLOC_*",          // allocator hooks
@@ -55,6 +55,7 @@ constexpr std::array<std::string_view, 19> kForbiddenEnvironment = {
     "NLSPATH",           // catalogue loading
     "HOSTALIASES",       // resolver redirection
     "AWS_ENDPOINT_URL*", // redirects every request, token included
+    "AWS_DATA_PATH",     // overrides service models and endpoint defaults
     "AWS_CA_BUNDLE",     // replaces the TLS trust store
     "AWS_CONFIG_FILE",   // swaps in a different profile configuration
     "AWS_SHARED_CREDENTIALS_FILE",

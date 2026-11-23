@@ -373,6 +373,9 @@ int run_aws_flow(const std::string &profile, pid_t caller,
   if (reject_unverified("aws", security.verify_aws())) {
     return EXIT_FAILURE;
   }
+  if (SignalGuard::received()) {
+    return EXIT_FAILURE;
+  }
 
   SecureString json = credentials->to_credential_process_json();
   std::cout.flush();
