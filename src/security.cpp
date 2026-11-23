@@ -8,6 +8,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <optional>
@@ -34,8 +35,14 @@ namespace {
 
 enum class PathKind { file, executable, directory };
 
+bool accepted_owner(const TrustPolicy &policy, uid_t owner) {
+  return std::find(policy.owners.begin(), policy.owners.end(), owner) !=
+         policy.owners.end();
+}
+
 std::optional<std::filesystem::path>
-trusted_path(const std::filesystem::path &candidate, PathKind kind) {
+trusted_path(const std::filesystem::path &candidate, PathKind kind,
+             const TrustPolicy &policy) {
   if (!candidate.is_absolute()) {
     return std::nullopt;
   }
@@ -44,7 +51,7 @@ trusted_path(const std::filesystem::path &candidate, PathKind kind) {
   auto remaining = candidate.relative_path();
   unsigned links = 0;
   struct stat info{};
-  if (::lstat("/", &info) != 0 || info.st_uid != 0 ||
+  if (::lstat("/", &info) != 0 || !accepted_owner(policy, info.st_uid) ||
       (info.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
     return std::nullopt;
   }
@@ -66,7 +73,8 @@ trusted_path(const std::filesystem::path &candidate, PathKind kind) {
     }
 
     const auto next = resolved / component;
-    if (::lstat(next.c_str(), &info) != 0 || info.st_uid != 0) {
+    if (::lstat(next.c_str(), &info) != 0 ||
+        !accepted_owner(policy, info.st_uid)) {
       return std::nullopt;
     }
     if (S_ISLNK(info.st_mode)) {
@@ -104,18 +112,21 @@ trusted_path(const std::filesystem::path &candidate, PathKind kind) {
 } // namespace
 
 std::optional<std::filesystem::path>
-Security::trusted_executable(const std::filesystem::path &candidate) {
-  return trusted_path(candidate, PathKind::executable);
+Security::trusted_executable(const std::filesystem::path &candidate,
+                             const TrustPolicy &policy) {
+  return trusted_path(candidate, PathKind::executable, policy);
 }
 
 std::optional<std::filesystem::path>
-Security::trusted_file(const std::filesystem::path &candidate) {
-  return trusted_path(candidate, PathKind::file);
+Security::trusted_file(const std::filesystem::path &candidate,
+                       const TrustPolicy &policy) {
+  return trusted_path(candidate, PathKind::file, policy);
 }
 
 std::optional<std::filesystem::path>
-Security::trusted_directory(const std::filesystem::path &candidate) {
-  return trusted_path(candidate, PathKind::directory);
+Security::trusted_directory(const std::filesystem::path &candidate,
+                            const TrustPolicy &policy) {
+  return trusted_path(candidate, PathKind::directory, policy);
 }
 
 SecurityVerdict Security::verify_git() const {

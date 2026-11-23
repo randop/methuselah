@@ -17,8 +17,9 @@ namespace methuselah {
 // inspected is reported as `faulted`, never as `passed`.
 //
 //  1. The running image (/proc/<pid>/exe, by inode, so a path swapped after
-//     exec cannot fool it) is a root-owned `aws` reached through a chain of
-//     root-owned, non-group/other-writable components.
+//     exec cannot fool it) is an `aws` reached through a chain of components
+//     owned by root or the `methuselah` service account, none of them writable
+//     by group or others.
 //  2. Optionally, its SHA-256 matches a root-owned pin list.
 //  3. No tracer is attached (no ptrace injection).
 //  4. Its argv does not redirect, weaken, or dump what it does with
@@ -40,6 +41,10 @@ public:
     // Absent file: pinning is skipped. Present but unusable: verification
     // faults.
     std::filesystem::path pin_file;
+    // UIDs allowed to own the CLI installation. Root is always accepted;
+    // default_options() adds the unprivileged `methuselah` service account
+    // when it exists. The calling user is never added.
+    std::vector<uid_t> install_owners{0};
   };
 
   [[nodiscard]] static Options default_options();

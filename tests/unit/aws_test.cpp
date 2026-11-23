@@ -10,6 +10,7 @@
 
 #include <sodium.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -184,9 +185,8 @@ void test_environment() {
         "LD_AUDIT");
   CHECK(V::forbidden_environment(clean + "AWS_DATA_PATH=/tmp/models" + '\0') ==
         "AWS_DATA_PATH");
-  CHECK(V::forbidden_environment(
-            bundled + "AWS_DATA_PATH=/tmp/models" + '\0', bundle) ==
-        "AWS_DATA_PATH");
+  CHECK(V::forbidden_environment(bundled + "AWS_DATA_PATH=/tmp/models" + '\0',
+                                 bundle) == "AWS_DATA_PATH");
 
   // Names must match; look-alikes and values must not.
   CHECK(!V::forbidden_environment(std::string("MY_LD_PRELOAD=1") + '\0')
@@ -271,6 +271,62 @@ void test_trusted_file() {
   CHECK(!Security::trusted_file("/etc/does-not-exist").has_value());
   ::unlink(lib.c_str());
   ::rmdir(dir);
+}
+
+void test_trust_policy() {
+  namespace fs = std::filesystem;
+  if (::geteuid() == 0) {
+    std::printf("SKIP trust policy: running as root\n");
+    return;
+  }
+
+  const fs::path base = fs::current_path() / "methuselah-trust-policy";
+  std::error_code ec;
+  fs::remove_all(base, ec);
+  fs::create_directories(base, ec);
+  if (ec) {
+    std::printf("SKIP trust policy: cannot create test directory\n");
+    return;
+  }
+  fs::permissions(base, fs::perms::owner_all, fs::perm_options::replace, ec);
+  const fs::path file = base / "sh";
+  std::ofstream(file) << "x";
+  ::chmod(file.c_str(), 0755);
+
+  TrustPolicy policy;
+  policy.owners = {0, ::geteuid()};
+  const auto dir = Security::trusted_directory(base, policy);
+  const auto exe = Security::trusted_executable(file, policy);
+  const auto regular = Security::trusted_file(file, policy);
+  if (!dir || !exe || !regular) {
+    std::printf("SKIP trust policy: test path has untrusted ancestors\n");
+  } else {
+    CHECK(*dir == base);
+    CHECK(*exe == file);
+    CHECK(*regular == file);
+    // Adding the owner must not change the default root-only policy.
+    CHECK(!Security::trusted_directory(base).has_value());
+    CHECK(!Security::trusted_executable(file).has_value());
+    CHECK(!Security::trusted_file(file).has_value());
+  }
+  fs::remove_all(base, ec);
+}
+
+void test_aws_defaults() {
+  const auto options = AwsCliVerifier::default_options();
+  const auto service =
+      std::filesystem::path("/opt/methuselah/aws-cli/v2/current/dist/aws");
+  CHECK(std::find(options.candidates.begin(), options.candidates.end(),
+                  service) != options.candidates.end());
+  CHECK(std::find(options.install_owners.begin(), options.install_owners.end(),
+                  0) != options.install_owners.end());
+  CHECK(options.pin_file == "/etc/methuselah/aws-cli.sha256");
+  if (::geteuid() != 0) {
+    // The caller must never be allowed to own the CLI it is verified against.
+    CHECK(std::find(options.install_owners.begin(),
+                    options.install_owners.end(),
+                    ::geteuid()) == options.install_owners.end());
+  }
 }
 
 void test_pin_file_and_hash() {
@@ -366,6 +422,62 @@ bool wait_for_exec(pid_t pid, const std::string &program) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   return false;
+}
+
+// The verifier must use its configured owner policy, not just the Security
+// helper, when the CLI is owned by the service account instead of root.
+void test_service_install() {
+  namespace fs = std::filesystem;
+  const auto shell = Security::trusted_executable("/bin/sh");
+  if (::geteuid() == 0 || !shell) {
+    std::printf("SKIP service install: needs a non-root caller and /bin/sh\n");
+    return;
+  }
+
+  const fs::path base = fs::current_path() / "methuselah-service-install";
+  std::error_code ec;
+  fs::remove_all(base, ec);
+  fs::create_directories(base, ec);
+  if (ec) {
+    std::printf("SKIP service install: cannot create test directory\n");
+    return;
+  }
+  fs::permissions(base, fs::perms::owner_all, fs::perm_options::replace, ec);
+  const fs::path copy = base / "sh";
+  fs::copy_file(*shell, copy, ec);
+  if (ec) {
+    std::printf("SKIP service install: cannot copy /bin/sh\n");
+    fs::remove_all(base, ec);
+    return;
+  }
+  ::chmod(copy.c_str(), 0755);
+
+  TrustPolicy policy;
+  policy.owners = {0, ::geteuid()};
+  if (!Security::trusted_executable(copy, policy)) {
+    std::printf("SKIP service install: test path has untrusted ancestors\n");
+    fs::remove_all(base, ec);
+    return;
+  }
+
+  AwsCliVerifier::Options options;
+  options.candidates = {copy};
+  options.required_name = "sh";
+  options.install_owners = policy.owners;
+  options.pin_file = base / "missing-pin";
+  const AwsCliVerifier verifier(options);
+  {
+    Child child = spawn(copy.string(), {"sh", "-c", "sleep 10; true"},
+                        {"HOME=/", "AWS_PROFILE=p"});
+    CHECK(wait_for_exec(child.pid, copy.string()));
+    const auto [result, reason] = verifier.verify(child.pid);
+    if (result != Result::passed) {
+      std::fprintf(stderr, "  unexpected verdict: %.*s\n",
+                   static_cast<int>(reason.size()), reason.data());
+    }
+    CHECK(result == Result::passed);
+  }
+  fs::remove_all(base, ec);
 }
 
 // Every verify_*() call returns the same SecurityVerdict shape.
@@ -509,8 +621,11 @@ int main() {
   test_arguments();
   test_maps();
   test_trusted_file();
+  test_trust_policy();
+  test_aws_defaults();
   test_pin_file_and_hash();
   test_verdict();
+  test_service_install();
   test_verify();
 
   std::printf("%d checks, %d failures\n", g_checks, g_failures);

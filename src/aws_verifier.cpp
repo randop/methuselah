@@ -14,11 +14,14 @@
 #include <cerrno>
 #include <cstdlib>
 #include <fstream>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <fcntl.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -26,7 +29,10 @@ namespace methuselah {
 namespace {
 
 using Result = SecurityVerificationResult;
-constexpr const char *kBundle = "/usr/local/aws-cli/v2/current/dist/aws";
+constexpr const char *kRootBundle = "/usr/local/aws-cli/v2/current/dist/aws";
+constexpr const char *kServiceBundle =
+    "/opt/methuselah/aws-cli/v2/current/dist/aws";
+constexpr const char *kServiceAccount = "methuselah";
 
 // Only string literals are accepted (see SecurityVerdict), so the returned
 // reason can never dangle.
@@ -89,6 +95,18 @@ bool is_hex_digest(std::string_view text) {
 
 bool same_file(const struct stat &a, const struct stat &b) {
   return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+}
+
+std::optional<uid_t> account_uid(const char *name) {
+  long size = ::sysconf(_SC_GETPW_R_SIZE_MAX);
+  std::vector<char> buffer(static_cast<std::size_t>(size > 0 ? size : 16384));
+  struct passwd entry{};
+  struct passwd *result = nullptr;
+  if (::getpwnam_r(name, &entry, buffer.data(), buffer.size(), &result) != 0 ||
+      result == nullptr) {
+    return std::nullopt;
+  }
+  return entry.pw_uid;
 }
 
 std::string_view next_entry(std::string_view &environment) {
@@ -187,11 +205,16 @@ bool allowed_special_mapping(std::string_view path) {
 AwsCliVerifier::Options AwsCliVerifier::default_options() {
   Options options;
   options.candidates = {
-      kBundle,
+      kServiceBundle,
+      kRootBundle,
       "/usr/local/bin/aws",
       "/usr/bin/aws",
   };
   options.pin_file = "/etc/methuselah/aws-cli.sha256";
+  if (const auto service = account_uid(kServiceAccount);
+      service && *service != 0 && *service != ::geteuid()) {
+    options.install_owners.push_back(*service);
+  }
   return options;
 }
 
@@ -396,10 +419,12 @@ SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
     return verdict(Result::failed, "caller executable was replaced on disk");
   }
 
+  const TrustPolicy install_trust{options_.install_owners};
   bool anyTrusted = false;
   bool matched = false;
+  std::string bundle_library_path;
   for (const auto &candidate : options_.candidates) {
-    const auto trusted = Security::trusted_executable(candidate);
+    const auto trusted = Security::trusted_executable(candidate, install_trust);
     if (!trusted || trusted->filename() != options_.required_name) {
       continue;
     }
@@ -408,12 +433,19 @@ SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
     if (::stat(trusted->c_str(), &expected) == 0 &&
         same_file(running, expected)) {
       matched = true;
+      const bool official_bundle =
+          candidate == std::filesystem::path(kServiceBundle) ||
+          candidate == std::filesystem::path(kRootBundle);
+      // The official Linux onedir bundle uses contents_directory='.'; its
+      // bootloader sets LD_LIBRARY_PATH to the actual executable directory.
+      if (official_bundle && *trusted == linkTarget) {
+        bundle_library_path = trusted->parent_path().string();
+      }
       break;
     }
   }
   if (!anyTrusted) {
-    return verdict(Result::faulted,
-                   "no root-owned AWS CLI v2 installation found");
+    return verdict(Result::faulted, "no trusted AWS CLI v2 installation found");
   }
   if (!matched) {
     return verdict(Result::failed, "caller is not a trusted AWS CLI v2");
@@ -477,13 +509,6 @@ SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
   if (!same_proc_object(pid, "root") || !same_proc_object(pid, "ns/mnt")) {
     return verdict(Result::faulted, "cannot verify caller filesystem context");
   }
-  // The official Linux onedir bundle uses contents_directory='.'; its
-  // bootloader sets LD_LIBRARY_PATH to the actual executable directory.
-  std::string bundle_library_path;
-  if (const auto bundle = Security::trusted_executable(kBundle);
-      bundle && *bundle == linkTarget) {
-    bundle_library_path = bundle->parent_path().string();
-  }
   if (const auto bad =
           forbidden_environment(*environment, bundle_library_path)) {
     SPDLOG_TRACE("aws caller environment variable not allowed: {}", *bad);
@@ -503,7 +528,7 @@ SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
     if (allowed_special_mapping(path)) {
       continue;
     }
-    if (!Security::trusted_file(path)) {
+    if (!Security::trusted_file(path, install_trust)) {
       SPDLOG_TRACE("aws caller has untrusted code mapped: {}", path);
       return verdict(Result::failed, "AWS CLI has untrusted code mapped");
     }

@@ -13,17 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `~/.config/pinentry.methuselah`) and are released only to a verified AWS
   CLI v2, as the JSON document the CLI expects, written straight to its pipe.
 - `AwsCliVerifier`: refuses to hand over credentials unless the calling
-  process is the root-owned native `aws` binary (matched by the inode of
-  `/proc/<pid>/exe`, so a swapped, copied, or deleted binary fails), is not
-  traced, and has no tampering vectors:
+  process is the native `aws` binary owned by root or the `methuselah` service
+  account (matched by the inode of `/proc/<pid>/exe`, so a swapped, copied, or
+  deleted binary fails), is not traced, and has no tampering vectors:
   - optional SHA-256 pin of the running binary in
     `/etc/methuselah/aws-cli.sha256` (root-owned);
   - no `LD_*`, `PYTHON*`, `MALLOC_*`, endpoint, or CA-bundle overrides in its
     start-up environment;
   - none of `--endpoint-url`, `--ca-bundle`, `--no-verify-ssl`, `--debug`, or
     `configure export-credentials` in its arguments;
-  - every executable file mapping is a root-owned file (no `/tmp` libraries,
-    deleted files, or memfd code, apart from libffi's trampoline memfd).
+  - every executable file mapping is owned by root or the service account (no
+    `/tmp` libraries, deleted files, or memfd code, apart from libffi's
+    trampoline memfd).
+- `scripts/aws.sh` installs AWS CLI v2 under `/opt/methuselah/aws-cli` for the
+  unprivileged `methuselah` system user, with read and execute access for the
+  `users` group, a root-owned launcher symlink, and a refreshed SHA-256 pin.
 - `Security::trusted_file()` (the `trusted_executable()` rules without the
   executable bit) and `ProcessInfo::readProc()` / `ProcessInfo::argv()`.
 - `InstanceLock::Mode::wait`: concurrent `credential_process` calls queue
@@ -32,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks, and `verify()` against real child processes.
 
 ### Changed
+- `AwsCliVerifier` accepts an AWS CLI v2 installed under
+  `/opt/methuselah/aws-cli` and owned by the unprivileged `methuselah` service
+  account in addition to root-owned installations. Path components may belong
+  to root or `methuselah`, but never to the calling user, and must not be
+  writable by group or others.
 - The unknown-macro check now runs before the instance lock is taken.
 - `Security::verify_git()`, `verify_gpg()`, `verify_ssh()`, and `verify_aws()`
   now all return a `SecurityVerdict` (`result` plus a `reason`) instead of a
