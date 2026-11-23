@@ -468,7 +468,8 @@ AwsVerdict AwsCliVerifier::verify(pid_t pid) const {
       bundle && *bundle == linkTarget) {
     bundle_library_path = bundle->parent_path().string();
   }
-  if (const auto bad = forbidden_environment(*environment, bundle_library_path)) {
+  if (const auto bad =
+          forbidden_environment(*environment, bundle_library_path)) {
     return verdict(Result::failed,
                    "AWS CLI environment variable not allowed: " + *bad);
   }

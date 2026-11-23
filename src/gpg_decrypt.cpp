@@ -152,7 +152,8 @@ DecryptResult GpgDecryptor::decrypt_fd(int fd,
     result.set_error("cannot rewind encrypted credentials");
     return result;
   }
-  return decrypt(passphrase, [&](GpgmeData &cipher) { return cipher.from_fd(fd); });
+  return decrypt(passphrase,
+                 [&](GpgmeData &cipher) { return cipher.from_fd(fd); });
 }
 
 } // namespace methuselah
