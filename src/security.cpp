@@ -319,8 +319,8 @@ SecurityVerdict Security::verify_ssh() const {
   return {Result::failed, "caller is not ssh or ssh-add"};
 }
 
-SecurityVerdict Security::verify_aws() const {
-  return AwsCliVerifier{}.verify(ProcessInfo::parent());
+SecurityVerdict Security::verify_aws(pid_t pid) const {
+  return AwsCliVerifier{}.verify(pid);
 }
 
 } // namespace methuselah

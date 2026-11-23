@@ -5,6 +5,7 @@
 #include <sys/types.h>
 
 #include <filesystem>
+#include <iosfwd>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -62,6 +63,9 @@ public:
   [[nodiscard]] static std::optional<std::string>
   forbidden_environment(std::string_view environment,
                         std::string_view bundle_library_path = {});
+
+  // Scans a trusted AWS config for a top-level plugins section.
+  [[nodiscard]] static SecurityVerdict scan_plugin_config(std::istream &stream);
 
   // Returns the offending argument.
   [[nodiscard]] static std::optional<std::string>

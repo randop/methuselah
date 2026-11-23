@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -195,6 +196,25 @@ void test_environment() {
              .has_value());
   CHECK(!V::forbidden_environment(std::string("AWS_PROFILE=LD_PRELOAD") + '\0')
              .has_value());
+}
+
+void test_plugin_config() {
+  using V = AwsCliVerifier;
+  std::istringstream clean(
+      "\n \t# [plugins]\n ; [plugins]\n[profile prod]\n"
+      "description = mentions [plugins]\n[plugins] other]\n");
+  CHECK(V::scan_plugin_config(clean).passed());
+
+  for (const char *config :
+       {"[plugins]", " \t[plugins] \r\n", "[plugins] # comment\n",
+        "[profile prod]\r[plugins]\r", "\u00a0[plugins]\n"}) {
+    std::istringstream blocked(config);
+    CHECK(V::scan_plugin_config(blocked).result == Result::failed);
+  }
+
+  std::istringstream unreadable;
+  unreadable.setstate(std::ios::badbit);
+  CHECK(V::scan_plugin_config(unreadable).result == Result::faulted);
 }
 
 void test_arguments() {
@@ -508,7 +528,10 @@ void test_verdict() {
   const Security security;
   const SecurityVerdict verdicts[] = {
       security.verify_git(), security.verify_gpg(), security.verify_ssh(),
-      security.verify_aws()};
+      security.verify_aws(::getpid())};
+  const auto invalid_aws_caller = security.verify_aws(0);
+  CHECK(invalid_aws_caller.result == Result::faulted);
+  CHECK(invalid_aws_caller.reason == "no AWS CLI parent process");
   for (const auto &verdict : verdicts) {
     CHECK(!verdict.passed());
     CHECK(!verdict.reason.empty());
@@ -618,6 +641,7 @@ int main() {
   }
   test_credentials();
   test_environment();
+  test_plugin_config();
   test_arguments();
   test_maps();
   test_trusted_file();

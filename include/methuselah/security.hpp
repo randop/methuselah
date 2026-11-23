@@ -82,9 +82,9 @@ public:
   [[nodiscard]] SecurityVerdict verify_gpg() const;
   [[nodiscard]] SecurityVerdict verify_ssh() const;
 
-  // Verifies that the calling process is an untampered AWS CLI v2 owned by
+  // Verifies that the supplied process is an untampered AWS CLI v2 owned by
   // root or the dedicated service account (see AwsCliVerifier).
-  [[nodiscard]] SecurityVerdict verify_aws() const;
+  [[nodiscard]] SecurityVerdict verify_aws(pid_t pid) const;
 };
 
 } // namespace methuselah

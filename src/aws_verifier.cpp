@@ -124,6 +124,29 @@ bool same_proc_object(pid_t pid, const char *leaf) {
          same_file(caller, self);
 }
 
+std::string_view strip_config_indent(std::string_view text) {
+  // RawConfigParser uses Python str.strip(), including Unicode whitespace.
+  constexpr std::string_view unicode_space[] = {
+      "\u0085", "\u00a0", "\u1680", "\u2000", "\u2001", "\u2002", "\u2003",
+      "\u2004", "\u2005", "\u2006", "\u2007", "\u2008", "\u2009", "\u200a",
+      "\u2028", "\u2029", "\u202f", "\u205f", "\u3000"};
+  while (!text.empty()) {
+    if (std::string_view(" \t\f\v\x1c\x1d\x1e\x1f").find(text.front()) !=
+        std::string_view::npos) {
+      text.remove_prefix(1);
+      continue;
+    }
+    const auto space =
+        std::find_if(std::begin(unicode_space), std::end(unicode_space),
+                     [text](auto prefix) { return starts_with(text, prefix); });
+    if (space == std::end(unicode_space)) {
+      break;
+    }
+    text.remove_prefix(space->size());
+  }
+  return text;
+}
+
 SecurityVerdict verify_plugin_config(std::string_view environment) {
   std::optional<std::string_view> home;
   while (!environment.empty()) {
@@ -174,19 +197,7 @@ SecurityVerdict verify_plugin_config(std::string_view environment) {
   // AWS CLI v2 looks up the exact top-level section "plugins" in full_config.
   // The shared credentials file only merges entries under "profiles".
   std::ifstream stream(*trusted_config);
-  if (!stream) {
-    return verdict(Result::faulted, "cannot read AWS CLI config file");
-  }
-  for (std::string line; std::getline(stream, line);) {
-    if (line.find("[plugins]") != std::string::npos) {
-      return verdict(Result::failed,
-                     "AWS CLI plugin configuration is not allowed");
-    }
-  }
-  if (stream.bad() || !stream.eof()) {
-    return verdict(Result::faulted, "cannot read AWS CLI config file");
-  }
-  return verdict(Result::passed, "ok");
+  return AwsCliVerifier::scan_plugin_config(stream);
 }
 
 // libffi legitimately backs closure trampolines with a memfd.
@@ -201,6 +212,30 @@ bool allowed_special_mapping(std::string_view path) {
 }
 
 } // namespace
+
+SecurityVerdict AwsCliVerifier::scan_plugin_config(std::istream &stream) {
+  for (std::string line; std::getline(stream, line);) {
+    // Python opens the config in universal newline mode.
+    std::string_view remaining(line);
+    while (!remaining.empty()) {
+      const auto cr = remaining.find('\r');
+      const auto text = strip_config_indent(remaining.substr(0, cr));
+      remaining = cr == std::string_view::npos ? std::string_view{}
+                                               : remaining.substr(cr + 1);
+      // RawConfigParser matches from the start of the trimmed line through
+      // the last closing bracket. It accepts trailing text after that bracket.
+      constexpr std::string_view header = "[plugins]";
+      if (starts_with(text, header) && text.rfind(']') == header.size() - 1) {
+        return verdict(Result::failed,
+                       "AWS CLI plugin configuration is not allowed");
+      }
+    }
+  }
+  if (stream.bad() || !stream.eof()) {
+    return verdict(Result::faulted, "cannot read AWS CLI config file");
+  }
+  return verdict(Result::passed, "ok");
+}
 
 AwsCliVerifier::Options AwsCliVerifier::default_options() {
   Options options;

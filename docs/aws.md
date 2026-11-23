@@ -25,6 +25,7 @@ group, then check `aws --version`.
 through shell history):
 
 ```bash
+mkdir -p -m 700 ~/.aws
 gpg --encrypt --recipient YOUR_KEY_ID --output ~/.aws/prod.credentials.gpg
 chmod 600 ~/.aws/prod.credentials.gpg
 ```

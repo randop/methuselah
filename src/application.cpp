@@ -370,7 +370,7 @@ int run_aws_flow(const std::string &profile, pid_t caller,
               << std::endl;
     return EXIT_FAILURE;
   }
-  if (reject_unverified("aws", security.verify_aws())) {
+  if (reject_unverified("aws", security.verify_aws(caller))) {
     return EXIT_FAILURE;
   }
   if (SignalGuard::received()) {
@@ -432,7 +432,7 @@ int Application::run(int argc, char **argv) {
     return run_git_flow(predicate);
   } else if (macro == Macro::Aws) {
     const pid_t caller = ProcessInfo::parent();
-    if (reject_unverified("aws", security.verify_aws())) {
+    if (reject_unverified("aws", security.verify_aws(caller))) {
       return EXIT_FAILURE;
     }
 

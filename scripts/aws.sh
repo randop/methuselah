@@ -89,9 +89,9 @@ fi
 # read and execute through the users group.
 sudo install -d -o root -g root -m 0755 /opt/methuselah
 sudo install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 \
-  "$INSTALL_ROOT" "$INSTALL_ROOT/bin"
-sudo chown -R "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_ROOT"
-sudo chmod -R u=rwX,g=rX,o= "$INSTALL_ROOT"
+  "$INSTALL_ROOT"
+# Modify the contents of the install tree only as the service account.
+sudo -u "$SERVICE_USER" -g "$SERVICE_GROUP" mkdir -p -- "$INSTALL_ROOT/bin"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/methuselah-aws.XXXXXX")
 cleanup() {
@@ -120,11 +120,10 @@ if [ -L "$INSTALL_ROOT/v2/current" ]; then
   install_args+=(--update)
 fi
 printf 'Installing AWS CLI v2 as %s\n' "$SERVICE_USER"
-sudo -u "$SERVICE_USER" "$tmp/aws/install" "${install_args[@]}"
+sudo -u "$SERVICE_USER" -g "$SERVICE_GROUP" "$tmp/aws/install" "${install_args[@]}"
 
-sudo chown -R "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_ROOT"
-sudo chmod -R u=rwX,g=rX,o= "$INSTALL_ROOT"
-sudo test -x "$INSTALL_ROOT/v2/current/dist/aws" ||
+sudo -u "$SERVICE_USER" -g "$SERVICE_GROUP" chmod -R u=rwX,g=rX,o= "$INSTALL_ROOT"
+sudo -u "$SERVICE_USER" -g "$SERVICE_GROUP" test -x "$INSTALL_ROOT/v2/current/dist/aws" ||
   die "AWS CLI installation is incomplete"
 
 install_link() {
@@ -141,7 +140,7 @@ install_link "$INSTALL_ROOT/bin/aws_completer" "$BIN_DIR/aws_completer"
 
 # Pin the launcher. The verifier refuses a CLI that differs from its pin.
 sudo install -d -o root -g root -m 0755 "$PIN_DIR"
-digest=$(sudo sha256sum "$INSTALL_ROOT/v2/current/dist/aws")
+digest=$(sudo -u "$SERVICE_USER" -g "$SERVICE_GROUP" sha256sum "$INSTALL_ROOT/v2/current/dist/aws")
 digest=${digest%% *}
 printf '%s  %s\n' "$digest" "$BIN_DIR/aws" |
   sudo tee "$PIN_FILE" >/dev/null
