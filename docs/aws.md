@@ -26,14 +26,28 @@ changes, and adds your account to `users`. Sign out and back in after the
 first run so your shell picks up that group, then check `aws --version`.
 Run the script again to update an existing install and refresh the pin.
 
-**1. Encrypt the credentials** (type or paste, then press Ctrl-D; nothing goes
-through shell history):
+## Setup
+
+The steps below use `gpg` directly. If you use `pass` and prefer to have the
+AWS CLI write the profile entries, see
+[Setup with `pass` and `aws configure`](#setup-with-pass-and-aws-configure)
+for an alternative to steps 1–3.
+
+### 1. Encrypt the credentials
+
+Type or paste the credentials, then press Ctrl-D; nothing goes through shell
+history:
 
 ```bash
 mkdir -p -m 700 ~/.aws
-gpg --encrypt --recipient YOUR_KEY_ID --output ~/.aws/prod.credentials.gpg
-chmod 600 ~/.aws/prod.credentials.gpg
+gpg --encrypt --recipient YOUR_KEY_ID \
+  --output ~/.aws/default.credentials.gpg
+chmod 600 ~/.aws/default.credentials.gpg
 ```
+
+Repeat this for every profile, replacing `default` in the file name. The
+examples below also use `dev.credentials.gpg`, `stage.credentials.gpg`, and
+`prod.credentials.gpg`.
 
 ```ini
 access_key_id=AKIA...
@@ -61,36 +75,156 @@ that set plus `_`, `-`, and `.`, and it requires `expiration`. `expiration`
 is UTC `YYYY-MM-DDTHH:MM:SSZ` and must still be in the future when the file
 is decrypted. Error text never includes those values.
 
-**2. Map the profile** in `~/.config/pinentry.methuselah`:
+### 2. Map profiles in Methuselah
+
+Each AWS CLI profile that uses the helper needs an `[aws:…]` entry in
+`~/.config/pinentry.methuselah`. Several AWS CLI profiles can point at the same
+Methuselah profile if they share credentials:
 
 ```ini
+[aws:default]
+gpgfile=~/.aws/default.credentials.gpg
+
+[aws:dev]
+gpgfile=~/.aws/dev.credentials.gpg
+
+[aws:stage]
+gpgfile=~/.aws/stage.credentials.gpg
+
 [aws:prod]
 gpgfile=~/.aws/prod.credentials.gpg
 ```
 
-The argument after `--macro=aws` selects `[aws:<profile>]`. The section name
-is matched without regard to case. With no argument the profile is
-`default`. A profile name is 1 to 64 characters from letters, digits, `_`,
-`-`, `.`, and `@`.
+Keep only the sections you need; the profile guides below use these names as
+examples. The argument after `--macro=aws` selects `[aws:<profile>]`; with no
+argument the profile is `default`. The section name is matched without regard
+to case. A profile name is 1 to 64 characters from letters, digits, `_`, `-`,
+`.`, and `@`. The name after `--macro=aws` is a Methuselah profile; it does not
+have to match the AWS CLI profile name, but using the same name avoids
+confusion.
 
-**3. Point the CLI at the helper.** Have an administrator create
-`/etc/methuselah/aws-home/.aws/config` with root ownership and no group or
-other write access on the file or its directories. The CLI's `HOME`, the
-`.aws` directory, and both `.aws/config` and `.aws/credentials` (when those
-files exist) all have to meet that rule. A missing `.aws` directory is
-allowed. Use the absolute path to the installed helper:
+### 3. Point the CLI at the helper
+
+Have an administrator create `/etc/methuselah/aws-home/.aws/config` with root
+ownership and no group or other write access on the file or its directories.
+The CLI's `HOME`, the `.aws` directory, and both `.aws/config` and
+`.aws/credentials` (when those files exist) all have to meet that rule. A
+missing `.aws` directory is allowed. Your account also needs read access to
+`config`; mode 0644 on the file and 0755 on the directories is enough. Keep
+group and other write access off. Use the absolute path to the installed
+helper in every `credential_process` entry.
+
+All profiles can share the same root-controlled AWS home. Use `[default]` for
+the default profile and `[profile <name>]` for each named profile; the same
+file can hold both.
+
+#### Default profile setup
+
+Use this when commands run without `--profile` (or with `--profile default`).
+If `AWS_PROFILE` or `AWS_DEFAULT_PROFILE` selects another profile, unset it or
+pass `--profile default`. The helper receives no profile argument, so it reads
+`[aws:default]`.
+
+Add this to `/etc/methuselah/aws-home/.aws/config`:
+
+```ini
+[default]
+credential_process = /usr/local/bin/methuselah --macro=aws
+```
+
+And this to `~/.config/pinentry.methuselah`:
+
+```ini
+[aws:default]
+gpgfile=~/.aws/default.credentials.gpg
+```
+
+Run:
+
+```bash
+GNUPGHOME="${GNUPGHOME:-$HOME/.gnupg}" HOME=/etc/methuselah/aws-home \
+  aws sts get-caller-identity
+```
+
+#### Single non-default profile setup
+
+Use this when you always pass `--profile prod` or set `AWS_PROFILE=prod`. The
+helper receives `prod`, so it reads `[aws:prod]`.
+
+Add this to `/etc/methuselah/aws-home/.aws/config`:
 
 ```ini
 [profile prod]
 credential_process = /usr/local/bin/methuselah --macro=aws prod
 ```
 
-Run the CLI as your normal user with the root-controlled AWS home and the
-GnuPG home that holds the private key for step 1:
+And this to `~/.config/pinentry.methuselah`:
+
+```ini
+[aws:prod]
+gpgfile=~/.aws/prod.credentials.gpg
+```
+
+Run:
 
 ```bash
-GNUPGHOME="${GNUPGHOME:-$HOME/.gnupg}" HOME=/etc/methuselah/aws-home aws --profile prod …
+GNUPGHOME="${GNUPGHOME:-$HOME/.gnupg}" HOME=/etc/methuselah/aws-home \
+  aws --profile prod sts get-caller-identity
 ```
+
+#### Multiple non-default profile setup
+
+Add a `[profile …]` section to the root-controlled CLI config for each AWS CLI
+profile. Each `credential_process` passes the Methuselah profile name to use;
+profiles that share credentials can pass the same name.
+
+Add this to `/etc/methuselah/aws-home/.aws/config`:
+
+```ini
+[profile dev]
+credential_process = /usr/local/bin/methuselah --macro=aws dev
+
+[profile stage]
+credential_process = /usr/local/bin/methuselah --macro=aws stage
+
+[profile prod]
+credential_process = /usr/local/bin/methuselah --macro=aws prod
+```
+
+And this to `~/.config/pinentry.methuselah`:
+
+```ini
+[aws:dev]
+gpgfile=~/.aws/dev.credentials.gpg
+
+[aws:stage]
+gpgfile=~/.aws/stage.credentials.gpg
+
+[aws:prod]
+gpgfile=~/.aws/prod.credentials.gpg
+```
+
+Run a command with the profile you want:
+
+```bash
+GNUPGHOME="${GNUPGHOME:-$HOME/.gnupg}" HOME=/etc/methuselah/aws-home \
+  aws --profile dev sts get-caller-identity
+
+GNUPGHOME="${GNUPGHOME:-$HOME/.gnupg}" HOME=/etc/methuselah/aws-home \
+  aws --profile stage sts get-caller-identity
+
+GNUPGHOME="${GNUPGHOME:-$HOME/.gnupg}" HOME=/etc/methuselah/aws-home \
+  aws --profile prod sts get-caller-identity
+```
+
+`AWS_PROFILE=dev` is equivalent to `--profile dev`; `AWS_DEFAULT_PROFILE`
+selects one when neither is set. With no profile selected, the CLI uses
+`[default]`. Add `region = <your-region>` to a profile if its commands need a
+region.
+
+Select profiles with `--profile`, `AWS_PROFILE`, or `AWS_DEFAULT_PROFILE`, not
+with `AWS_CONFIG_FILE` or `AWS_SHARED_CREDENTIALS_FILE`; the helper refuses a
+CLI started with those overrides.
 
 Set `GNUPGHOME` to the absolute path of your keyring directory if you keep it
 elsewhere. The helper inherits it for GPGME decryption and still finds its
@@ -105,13 +239,15 @@ Credentials are written only to a pipe or a socket, which is how
 refused. Cancelling the passphrase prompt fails the request. Concurrent
 calls wait for one another; if that lock cannot be taken, the request fails.
 
-**4. Optional but recommended: pin the CLI binary.** The installer writes
-`/etc/methuselah/aws-cli.sha256`. While that file exists, the running `aws`
-image must match one of its digests. Remove the file only to skip the digest
-check. A pin that is present but unusable fails closed: it must be a
-root-owned regular file, not writable by group or others, in `sha256sum`
-form, with at least one 64-digit hex digest, and at most 64 KiB. `#`
-comments and blank lines are allowed. The text after each digest is ignored.
+### 4. Optional but recommended: pin the CLI binary
+
+The installer writes `/etc/methuselah/aws-cli.sha256`. While that file exists,
+the running `aws` image must match one of its digests. Remove the file only to
+skip the digest check. A pin that is present but unusable fails closed: it
+must be a root-owned regular file, not writable by group or others, in
+`sha256sum` form, with at least one 64-digit hex digest, and at most 64 KiB.
+`#` comments and blank lines are allowed. The text after each digest is
+ignored.
 
 Refresh the pin after every manual AWS CLI update. Hash the file the process
 executes, then keep the pin root-owned:
@@ -124,7 +260,189 @@ sudo chown root:root /etc/methuselah/aws-cli.sha256
 sudo chmod 0644 /etc/methuselah/aws-cli.sha256
 ```
 
-### What is verified
+## Setup with `pass` and `aws configure`
+
+This alternative to steps 1–3 keeps the credential material in `pass` and
+uses the AWS CLI to write the root-controlled profile entries. The
+root-controlled AWS home from step 3 still applies, and so does the optional
+pin in step 4. The helper never calls `pass`; it reads the `.gpg` file that
+`pass` produced.
+
+You need the AWS CLI from [Installation](#installation), `pass`, and a GPG
+secret key available in the keyring that `pass` and the helper use. If `pass`
+is not installed, use your package manager, for example `apt install pass` or
+`dnf install pass`.
+
+Do not run plain `aws configure` to enter access keys. It writes them in
+plaintext to `.aws/credentials` in the selected home, outside the encrypted
+store. Use `pass` for the secrets and `aws configure set` for the non-secret
+settings such as `credential_process`, `region`, and `output`.
+
+### Store credentials with pass
+
+Initialize the store with the key that should decrypt the entries. Skip this
+if the store is already initialized for the same key:
+
+```bash
+pass init YOUR_KEY_ID
+```
+
+`pass init` sets the recipients for the whole store; subdirectories can have
+their own `.gpg-id`. If the store already exists, make sure your key is one
+of the recipients before continuing. If the store already exists and you keep
+a separate key per profile, initialize only the `aws` subdirectory with
+`pass init --path aws YOUR_KEY_ID`.
+
+Insert one entry per Methuselah profile. `--multiline` reads until Ctrl-D and
+keeps the `key=value` lines together:
+
+```bash
+pass insert --multiline aws/default
+pass insert --multiline aws/prod
+```
+
+Paste the `key=value` lines accepted in step 1. For temporary credentials,
+include `session_token` and `expiration`. Use `--multiline`; a plain
+`pass insert` stores a single line that the helper cannot parse.
+
+The entries are stored as `~/.password-store/aws/default.gpg` and
+`~/.password-store/aws/prod.gpg`, encrypted to the recipients in the
+applicable `.gpg-id` (usually `~/.password-store/.gpg-id`). The helper
+decrypts the file directly with GPGME, so `pass` does not have to be on
+`PATH` when the CLI runs; GnuPG and `gpg-agent` are still required. Use the
+same absolute `GNUPGHOME` for `pass` and for `aws`; if the keyring is
+elsewhere, set it for both commands. The helper only needs a private key that
+matches one recipient of the file.
+
+`pass` creates a regular file that you own. Confirm that group and others
+cannot write it, and clear that access if they can. Adjust the path if you
+use `PASSWORD_STORE_DIR`, and repeat after `pass insert`, `pass edit`, or a
+`pass init` that re-encrypts existing entries:
+
+```bash
+chmod 600 ~/.password-store/aws/*.gpg
+```
+
+If you use a different `PASSWORD_STORE_DIR`, point `gpgfile` at the absolute
+path of the `.gpg` file there. The helper expands `~` from your account's
+home in the password database, not from the AWS home it runs with. A
+relative path is resolved against the helper's working directory, so use an
+absolute path.
+
+### Map the entries in Methuselah
+
+Add one `[aws:…]` section per profile to `~/.config/pinentry.methuselah`
+instead of the `~/.aws/*.credentials.gpg` paths from step 2, and point
+`gpgfile` at the pass file:
+
+```ini
+[aws:default]
+gpgfile=~/.password-store/aws/default.gpg
+
+[aws:prod]
+gpgfile=~/.password-store/aws/prod.gpg
+```
+
+Keep only the profiles you use. The part after `aws:` is the Methuselah
+profile and follows the name rules in step 2. With no argument, the helper
+uses `default`; otherwise it uses the name passed after `--macro=aws` in the
+next section. The AWS CLI profile name does not have to match, but using the
+same name avoids confusion.
+
+### Write the CLI config with aws configure
+
+Have an administrator create the root-controlled AWS home and write the
+entries with `aws configure set`. `HOME` selects the AWS home, and
+`--profile default` selects `[default]` even if `AWS_PROFILE` is set in the
+administrator's environment. `aws configure` itself only prompts for access
+keys, region, and output; it has no prompt for `credential_process`, so use
+`aws configure set`:
+
+```bash
+sudo install -d -o root -g root -m 755 /etc/methuselah/aws-home
+sudo env HOME=/etc/methuselah/aws-home \
+  /usr/local/bin/aws configure set credential_process \
+  '/usr/local/bin/methuselah --macro=aws' --profile default
+```
+
+For each named profile, pass the profile name to `aws configure set` and the
+same name to the helper:
+
+```bash
+sudo env HOME=/etc/methuselah/aws-home \
+  /usr/local/bin/aws configure set credential_process \
+  '/usr/local/bin/methuselah --macro=aws prod' --profile prod
+```
+
+Repeat for `dev`, `stage`, and any other profile. `aws configure set` writes
+`[default]` for `--profile default` and `[profile <name>]` otherwise,
+creating the file if needed. Add `region` or `output` the same way:
+
+```bash
+sudo env HOME=/etc/methuselah/aws-home \
+  /usr/local/bin/aws configure set region us-east-1 --profile prod
+```
+
+Make sure `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` are unset when
+running these commands, or the CLI writes somewhere else. Afterward, make
+sure the AWS home is root-owned, readable by your account, and not writable
+by group or others:
+
+```bash
+sudo chown -R root:root /etc/methuselah/aws-home
+sudo chmod -R go-w /etc/methuselah/aws-home
+sudo chmod 755 /etc/methuselah/aws-home /etc/methuselah/aws-home/.aws
+sudo chmod 644 /etc/methuselah/aws-home/.aws/config
+sudo env HOME=/etc/methuselah/aws-home \
+  /usr/local/bin/aws configure list-profiles
+```
+
+`aws configure list-profiles` should show `default` and each named profile.
+Repeat the permission commands whenever you add a profile. `aws configure
+set` writes only `config`; do not use it to set `aws_access_key_id` or
+`aws_secret_access_key`, which would put plaintext secrets in
+`.aws/credentials`.
+
+### Update or remove entries
+
+To rotate a secret, replace the entry with `pass edit aws/prod` or
+`pass insert --multiline aws/prod`, then run the `chmod` above. No
+Methuselah or AWS CLI config changes are needed because the path stays the
+same. To remove a profile, delete the entry with `pass rm aws/prod` and
+remove its `[aws:prod]` and `[profile prod]` sections.
+
+### Verify
+
+Run a command as your normal user, with the root-controlled AWS home and the
+GPG home that holds the key used by `pass`. Make sure `AWS_CONFIG_FILE` and
+`AWS_SHARED_CREDENTIALS_FILE` are unset; the helper refuses a CLI started
+with either. Leave `LD_LIBRARY_PATH` unset too; the helper refuses an
+inherited value.
+
+```bash
+pass ls aws
+GNUPGHOME="${GNUPGHOME:-$HOME/.gnupg}" HOME=/etc/methuselah/aws-home \
+  aws --profile default sts get-caller-identity
+
+GNUPGHOME="${GNUPGHOME:-$HOME/.gnupg}" HOME=/etc/methuselah/aws-home \
+  aws --profile prod sts get-caller-identity
+```
+
+`pass ls aws` confirms the entries exist. A successful command prints the
+account, user, and ARN for the credential set.
+
+### Troubleshooting
+
+- `no [aws:<profile>] gpgfile`: add the matching `[aws:<profile>]` section to
+  `~/.config/pinentry.methuselah`.
+- `must be a regular file owned by you and not writable by group or others`:
+  confirm that the file is not a symlink and run the `chmod` above.
+- Credential decryption fails: confirm that a private key for one of the
+  file's recipients is in the keyring named by `GNUPGHOME`.
+- The AWS CLI refuses the environment: unset `AWS_CONFIG_FILE` and
+  `AWS_SHARED_CREDENTIALS_FILE`, and leave `LD_LIBRARY_PATH` unset.
+
+## What is verified
 
 The helper writes no credentials, and exits non-zero, unless the caller:
 
@@ -173,7 +491,7 @@ The caller is verified before the passphrase prompt. After the prompt the
 helper checks that the parent is still that caller, verifies it again, and
 writes nothing if a signal arrived in between.
 
-### Limitations
+## Limitations
 
 - Only AWS CLI v2 is accepted. An installation owned by the account running
   the helper is refused, including a copy under that account's home. Root
