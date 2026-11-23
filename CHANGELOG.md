@@ -5,7 +5,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-11-23
+
+### Added
+- `--macro=aws`: an AWS CLI `credential_process` helper. Credentials stay in a
+  GPG-encrypted file (`[aws:<profile>]` section in
+  `~/.config/pinentry.methuselah`) and are released only to a verified AWS
+  CLI v2, as the JSON document the CLI expects, written straight to its pipe.
+- `AwsCliVerifier`: refuses to hand over credentials unless the calling
+  process is the root-owned native `aws` binary (matched by the inode of
+  `/proc/<pid>/exe`, so a swapped, copied, or deleted binary fails), is not
+  traced, and has no tampering vectors:
+  - optional SHA-256 pin of the running binary in
+    `/etc/methuselah/aws-cli.sha256` (root-owned);
+  - no `LD_*`, `PYTHON*`, `MALLOC_*`, endpoint, or CA-bundle overrides in its
+    start-up environment;
+  - none of `--endpoint-url`, `--ca-bundle`, `--no-verify-ssl`, `--debug`, or
+    `configure export-credentials` in its arguments;
+  - every executable file mapping is a root-owned file (no `/tmp` libraries,
+    deleted files, or memfd code, apart from libffi's trampoline memfd).
+- `Security::trusted_file()` (the `trusted_executable()` rules without the
+  executable bit) and `ProcessInfo::readProc()` / `ProcessInfo::argv()`.
+- `InstanceLock::Mode::wait`: concurrent `credential_process` calls queue
+  behind each other instead of exiting.
+- Unit tests (`meson test -C .build`) for the credential parser, the verifier
+  checks, and `verify()` against real child processes.
+
+### Changed
+- The unknown-macro check now runs before the instance lock is taken.
+
+### Security
+- The AWS macro re-verifies the caller after the passphrase prompt, right
+  before writing credentials, and refuses a stdout that is not a pipe.
+- The encrypted credentials file must be a regular file owned by the user and
+  not writable by group or others.
+- Expired credentials, unknown keys, duplicate keys, and values outside the
+  characters AWS uses are rejected; errors never include secret values.
+- A failed, cancelled, or contended AWS request exits non-zero with no output;
+  it never reports an empty success.
+
+## [0.7.1] - 2026-11-23
+
+### Security
+- Fixed CVE-2026-129975, a double free in GPGME's `read_status()` and
+  `read_colon_line()` reachable through a crafted OpenPGP key with a very long
+  user ID. Both functions grew their 1024-byte buffer but only wrote the new
+  pointer back to the engine context on exit, so early returns left a stale
+  pointer that was later freed a second time. The flaw dates back to 2002 and
+  could allow data exfiltration and possibly remote code execution.
+
+### Changed
+- Raised the minimum GPGME version from 2.2.0 to 2.3.1 in `meson.build`, and
+  `scripts/deps.sh` now builds gpgme 2.3.1.
+- `scripts/deps.sh` rebuilds gpgme when its pkg-config metadata is missing or
+  older than the pinned version, so an existing 2.2.0 build is replaced.
+
 ## [0.7.0] - 2026-11-21
+
+### Added
+- `tests/security.sh`, a Linux-only script that launches the helper and checks
+  its process hardening, with an optional check that startup is refused under
+  `strace`.
+- `scripts/deps-x11.sh` builds the X11 libraries and OpenGL dispatch under
+  `$HOME/opt/x11`.
+- `scripts/tests.sh`, an end-to-end test that reloads the GPG agent and runs a
+  `gpg --clearsign` passphrase prompt through the pinentry.
+- Local `fmt` 12.0.0 wrap in `subprojects/` so spdlog's `fmt` dependency does
+  not rely on WrapDB.
+
+### Changed
+- libsodium 1.0.22 or newer, built as a static library, is now a required
+  dependency. `scripts/deps.sh` builds it when the distribution does not supply
+  it, and `BUILD.md` documents the requirement.
+- `scripts/compile.sh` and `scripts/debug.sh` add the X11 prefix to
+  `PKG_CONFIG_PATH` and `CMAKE_PREFIX_PATH`, and reconfigure Meson when
+  `build.ninja` is missing instead of only checking for the build directory.
+  `scripts/compile.sh` also warns when X11 has not been built.
+
+### Fixed
+- Build detects whether the compiler supports C++23 `std::format` and disables
+  spdlog's `std_format` option when it does not (for example on GCC 12).
+- `scripts/deps.sh` puts the locally built libgpg-error first in `PATH`, so
+  gpgme's configure step no longer picks up the system libgpg-error 1.46 when
+  it needs 1.47 or newer.
 
 ### Security
 - Added libsodium guarded memory for secrets via `SecureString` and

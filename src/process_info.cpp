@@ -1,6 +1,9 @@
 #include "methuselah/process_info.hpp"
 
+#include <fcntl.h>
 #include <unistd.h>
+
+#include <cerrno>
 
 #include <charconv>
 #include <filesystem>
@@ -89,6 +92,57 @@ std::optional<std::string> ProcessInfo::cmdline(pid_t pid) {
     raw.pop_back();
   }
   return raw;
+}
+
+std::optional<std::string> ProcessInfo::readProc(pid_t pid, const char *leaf,
+                                                 std::size_t maxBytes) {
+  const std::string path = procPath(pid, leaf).string();
+  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    return std::nullopt;
+  }
+
+  // procfs files report a size of zero, so read until EOF.
+  std::string data;
+  char buffer[4096];
+  for (;;) {
+    const ssize_t n = ::read(fd, buffer, sizeof(buffer));
+    if (n > 0) {
+      if (data.size() + static_cast<std::size_t>(n) > maxBytes) {
+        ::close(fd);
+        return std::nullopt;
+      }
+      data.append(buffer, static_cast<std::size_t>(n));
+      continue;
+    }
+    if (n < 0 && errno == EINTR) {
+      continue;
+    }
+    if (n < 0) {
+      ::close(fd);
+      return std::nullopt;
+    }
+    break;
+  }
+  ::close(fd);
+  return data;
+}
+
+std::optional<std::vector<std::string>> ProcessInfo::argv(pid_t pid) {
+  const auto raw = readProc(pid, "cmdline");
+  if (!raw) {
+    return std::nullopt;
+  }
+
+  std::vector<std::string> args;
+  std::string_view rest(*raw);
+  while (!rest.empty()) {
+    const auto nul = rest.find('\0');
+    args.emplace_back(rest.substr(0, nul));
+    rest = nul == std::string_view::npos ? std::string_view{}
+                                         : rest.substr(nul + 1);
+  }
+  return args;
 }
 
 std::optional<ProcessInfo::Entry> ProcessInfo::describe(pid_t pid) {

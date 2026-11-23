@@ -1,5 +1,6 @@
 #include "config.h"
 
+#include "methuselah/aws_verifier.hpp"
 #include "methuselah/git_helper.hpp"
 #include "methuselah/process_info.hpp"
 #include "methuselah/security.hpp"
@@ -27,8 +28,10 @@ void report(const ProcessInfo::Entry &e, const char *label) {
 
 } // namespace
 
+namespace {
+
 std::optional<std::filesystem::path>
-Security::trusted_executable(const std::filesystem::path &candidate) {
+trusted_path(const std::filesystem::path &candidate, bool requireExecutable) {
   if (!candidate.is_absolute()) {
     return std::nullopt;
   }
@@ -86,10 +89,22 @@ Security::trusted_executable(const std::filesystem::path &candidate) {
   }
 
   if (::stat(resolved.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
-      ::access(resolved.c_str(), X_OK) != 0) {
+      (requireExecutable && ::access(resolved.c_str(), X_OK) != 0)) {
     return std::nullopt;
   }
   return resolved;
+}
+
+} // namespace
+
+std::optional<std::filesystem::path>
+Security::trusted_executable(const std::filesystem::path &candidate) {
+  return trusted_path(candidate, true);
+}
+
+std::optional<std::filesystem::path>
+Security::trusted_file(const std::filesystem::path &candidate) {
+  return trusted_path(candidate, false);
 }
 
 SecurityVerificationResult Security::verify_git() const {
@@ -273,6 +288,15 @@ SecurityVerificationResult Security::verify_ssh() const {
   }
   return sameAdd ? SecurityVerificationResult::passed
                  : SecurityVerificationResult::failed;
+}
+
+SecurityVerificationResult Security::verify_aws(std::string *reason) const {
+  const pid_t caller = ProcessInfo::parent();
+  const AwsVerdict verdict = AwsCliVerifier{}.verify(caller);
+  if (reason != nullptr) {
+    *reason = verdict.reason;
+  }
+  return verdict.result;
 }
 
 } // namespace methuselah

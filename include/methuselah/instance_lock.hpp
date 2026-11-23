@@ -4,7 +4,15 @@ namespace methuselah {
 
 class InstanceLock {
 public:
-  InstanceLock();
+  enum class Mode {
+    // Single GUI instance: a second copy focuses the first and gives up.
+    focus_existing,
+    // Serialise credential_process callers: wait for the holder to finish so
+    // the next caller can reuse what it unlocked instead of exiting silently.
+    wait,
+  };
+
+  explicit InstanceLock(Mode mode = Mode::focus_existing);
   ~InstanceLock();
 
   InstanceLock(const InstanceLock &) = delete;

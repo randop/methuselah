@@ -2,6 +2,7 @@
 
 #include "methuselah/application.hpp"
 
+#include "methuselah/aws_credentials.hpp"
 #include "methuselah/config.hpp"
 #include "methuselah/git_credentials.hpp"
 #include "methuselah/gpg_decrypt.hpp"
@@ -18,6 +19,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -26,6 +29,9 @@
 #include <optional>
 #include <string>
 #include <string_view>
+
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace methuselah {
 namespace {
@@ -53,6 +59,9 @@ Macro parse_macro(int argc, char **argv) {
   } else if (flag == "--macro=ssh") {
     SPDLOG_TRACE("macro: ssh");
     return Macro::Ssh;
+  } else if (flag == "--macro=aws") {
+    SPDLOG_TRACE("macro: aws");
+    return Macro::Aws;
   }
   return Macro::Unknown;
 }
@@ -196,6 +205,145 @@ int run_ssh_flow() {
   return EXIT_SUCCESS;
 }
 
+bool valid_profile_name(std::string_view name) {
+  return !name.empty() && name.size() <= 64 &&
+         std::all_of(name.begin(), name.end(), [](unsigned char c) {
+           return std::isalnum(c) != 0 || c == '_' || c == '-' || c == '.' ||
+                  c == '@';
+         });
+}
+
+// Anyone who can replace the encrypted file can encrypt their own keys to the
+// user's public key and make the AWS CLI talk to their account instead.
+bool credential_file_is_private(const std::filesystem::path &path) {
+  struct stat info{};
+  return ::stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode) &&
+         info.st_uid == ::getuid() && (info.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+std::optional<std::filesystem::path> aws_gpg_path(const std::string &profile) {
+  const std::filesystem::path config_path = resolve_path(kConfigFile);
+  if (!std::filesystem::exists(config_path)) {
+    std::cerr << "ERROR(configuration): config path is missing on "
+              << config_path.string() << std::endl;
+    return std::nullopt;
+  }
+
+  Config config;
+  try {
+    config = Config::load(config_path);
+  } catch (const std::exception &ex) {
+    std::cerr << "Failed to parse config file: " << ex.what() << '\n';
+    return std::nullopt;
+  }
+
+  const std::string section = "aws:" + profile;
+  const auto gpg_file = config.gpg_file_for(section);
+  if (!gpg_file) {
+    std::cerr << "ERROR(configuration): no [" << section << "] gpgfile in "
+              << config_path.string() << std::endl;
+    return std::nullopt;
+  }
+  return resolve_path(*gpg_file);
+}
+
+// Reuses an unlocked gpg-agent when possible, otherwise asks for the
+// passphrase. Unlike the git flow, cancelling is a failure: the CLI must not
+// see an empty, "successful" reply.
+std::optional<DecryptResult>
+unlock_credentials(const GpgDecryptor &decryptor,
+                   const std::filesystem::path &file) {
+  auto remembered = decryptor.decrypt_file(file, SecureString{});
+  if (remembered.ok()) {
+    return remembered;
+  }
+
+  UiSession::install_log_callback();
+  UiSession ui;
+  if (!ui.ready()) {
+    return std::nullopt;
+  }
+
+  PromptOptions options;
+  options.title = "aws credentials";
+  options.message = kDefaultMessage;
+
+  while (!SignalGuard::received()) {
+    std::optional<SecureString> password = ui.prompt_password(options);
+    if (!password) {
+      break;
+    }
+    auto result = decryptor.decrypt_file(file, *password);
+    secure_clear(*password);
+    if (result.ok()) {
+      return result;
+    }
+    std::cerr << "ERROR: credential decryption issue on " << file << ": "
+              << result.error() << std::endl;
+  }
+  return std::nullopt;
+}
+
+int run_aws_flow(const std::string &profile, pid_t caller,
+                 const Security &security) {
+  if (!valid_profile_name(profile)) {
+    std::cerr << "Error: invalid aws profile name" << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  // credential_process output must go to the CLI's pipe, never a terminal or
+  // a file where it would linger in scrollback or on disk.
+  struct stat out{};
+  if (::fstat(STDOUT_FILENO, &out) != 0 ||
+      !(S_ISFIFO(out.st_mode) || S_ISSOCK(out.st_mode))) {
+    std::cerr << "Error: stdout must be a pipe from the AWS CLI" << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  const auto gpg_path = aws_gpg_path(profile);
+  if (!gpg_path) {
+    return EXIT_FAILURE;
+  }
+  if (!credential_file_is_private(*gpg_path)) {
+    std::cerr << "Error: " << gpg_path->string()
+              << " must be a regular file owned by you and not writable by "
+                 "group or others"
+              << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  GpgDecryptor decryptor;
+  auto unlocked = unlock_credentials(decryptor, *gpg_path);
+  if (!unlocked) {
+    std::cerr << "Error: could not unlock aws credentials for profile "
+              << profile << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  std::string error;
+  auto credentials = AwsCredentials::parse(unlocked->plaintext(), error);
+  if (!credentials) {
+    std::cerr << "Error: " << error << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  // The prompt can stay open for a long time. Make sure the process that is
+  // about to receive the secrets is still the verified AWS CLI.
+  std::string reason;
+  if (ProcessInfo::parent() != caller ||
+      security.verify_aws(&reason) != SecurityVerificationResult::passed) {
+    std::cerr << "Error: aws caller changed or failed re-verification"
+              << (reason.empty() ? "" : ": ") << reason << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  SecureString json = credentials->to_credential_process_json();
+  std::cout.flush();
+  const bool written = secure_write(STDOUT_FILENO, json);
+  secure_clear(json);
+  return written ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 } // namespace
 
 int Application::run(int argc, char **argv) {
@@ -207,16 +355,19 @@ int Application::run(int argc, char **argv) {
   Logger logger;
   Security security;
   SignalGuard signals;
-  InstanceLock lock;
-
-  if (!lock.acquired()) {
-    return EXIT_SUCCESS;
-  }
 
   const Macro macro = parse_macro(argc, argv);
   if (macro == Macro::Unknown) {
     std::cerr << "Error: unknown macro" << std::endl;
     return EXIT_FAILURE;
+  }
+
+  // credential_process callers queue behind each other and must never get an
+  // empty "success"; the GUI macros keep the single-instance behaviour.
+  InstanceLock lock(macro == Macro::Aws ? InstanceLock::Mode::wait
+                                        : InstanceLock::Mode::focus_existing);
+  if (!lock.acquired()) {
+    return macro == Macro::Aws ? EXIT_FAILURE : EXIT_SUCCESS;
   }
 
   if (macro == Macro::Git && (argc < 3 || std::strcmp(argv[2], "get") != 0)) {
@@ -244,6 +395,20 @@ int Application::run(int argc, char **argv) {
 
     const GitPredicate predicate = GitPredicate::read_from_stdin();
     return run_git_flow(predicate);
+  } else if (macro == Macro::Aws) {
+    const pid_t caller = ProcessInfo::parent();
+    std::string reason;
+    const auto svr = security.verify_aws(&reason);
+    if (svr != SecurityVerificationResult::passed) {
+      std::cerr << "Error: aws macro security verification "
+                << (svr == SecurityVerificationResult::failed ? "failure"
+                                                              : "faulted")
+                << ": " << reason << std::endl;
+      return EXIT_FAILURE;
+    }
+
+    const std::string profile = argc >= 3 ? argv[2] : "default";
+    return run_aws_flow(profile, caller, security);
   } else if (macro == Macro::Dummy) {
     return run_dummy();
   } else if (macro == Macro::Ssh) {

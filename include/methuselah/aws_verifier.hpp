@@ -1,0 +1,86 @@
+#pragma once
+
+#include "methuselah/security.hpp"
+
+#include <sys/types.h>
+
+#include <filesystem>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace methuselah {
+
+struct AwsVerdict {
+  SecurityVerificationResult result = SecurityVerificationResult::faulted;
+  std::string reason;
+};
+
+// Decides whether the process that invoked `credential_process` is a genuine,
+// untampered AWS CLI v2. Every check fails closed: anything that cannot be
+// inspected is reported as `faulted`, never as `passed`.
+//
+//  1. The running image (/proc/<pid>/exe, by inode, so a path swapped after
+//     exec cannot fool it) is a root-owned `aws` reached through a chain of
+//     root-owned, non-group/other-writable components.
+//  2. Optionally, its SHA-256 matches a root-owned pin list.
+//  3. No tracer is attached (no ptrace injection).
+//  4. Its argv does not redirect, weaken, or dump what it does with
+//     credentials (--endpoint-url, --no-verify-ssl, --debug,
+//     `configure export-credentials`, ...).
+//  5. Its start-up environment carries no loader, interpreter, endpoint, or
+//     trust-store overrides.
+//  6. Every executable file mapping is a root-owned file; no deleted or
+//     memfd-backed code.
+class AwsCliVerifier {
+public:
+  struct Options {
+    // Install locations of the native AWS CLI v2 executable.
+    std::vector<std::filesystem::path> candidates;
+    // File name every resolved candidate must have (guards against an `aws`
+    // symlink that resolves to an interpreter or shell).
+    std::string required_name = "aws";
+    // Optional root-owned list of allowed SHA-256 digests (sha256sum format).
+    // Absent file: pinning is skipped. Present but unusable: verification
+    // faults.
+    std::filesystem::path pin_file;
+  };
+
+  [[nodiscard]] static Options default_options();
+
+  AwsCliVerifier() : options_(default_options()) {}
+  explicit AwsCliVerifier(Options options) : options_(std::move(options)) {}
+
+  [[nodiscard]] AwsVerdict verify(pid_t pid) const;
+
+  // Pure helpers, exposed for unit tests.
+
+  // `environment` is the raw NUL-separated /proc/<pid>/environ. Returns the
+  // offending variable name.
+  [[nodiscard]] static std::optional<std::string>
+  forbidden_environment(std::string_view environment);
+
+  // Returns the offending argument.
+  [[nodiscard]] static std::optional<std::string>
+  forbidden_arguments(const std::vector<std::string> &args);
+
+  // Paths of file-backed, executable mappings from /proc/<pid>/maps. A
+  // trailing " (deleted)" is preserved so callers can reject it.
+  [[nodiscard]] static std::vector<std::string>
+  executable_mapping_paths(std::string_view maps);
+
+  // Parses sha256sum-style lines ("<64 hex>  <name>"), '#' comments and blank
+  // lines allowed. Digests are returned lowercase. Any malformed line makes
+  // the whole list invalid (nullopt), as does an empty list.
+  [[nodiscard]] static std::optional<std::vector<std::string>>
+  parse_pin_file(std::string_view text);
+
+  // Lowercase hex SHA-256 of everything readable from `fd`.
+  [[nodiscard]] static std::optional<std::string> sha256_hex(int fd);
+
+private:
+  Options options_;
+};
+
+} // namespace methuselah

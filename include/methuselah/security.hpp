@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <string>
 
 namespace methuselah {
 
@@ -28,9 +29,19 @@ public:
   [[nodiscard]] static std::optional<std::filesystem::path>
   trusted_executable(const std::filesystem::path &candidate);
 
+  // Same trust rules as trusted_executable(), for a regular file that is only
+  // mapped or read (shared libraries, pin lists) and need not be executable.
+  [[nodiscard]] static std::optional<std::filesystem::path>
+  trusted_file(const std::filesystem::path &candidate);
+
   [[nodiscard]] SecurityVerificationResult verify_git() const;
   [[nodiscard]] SecurityVerificationResult verify_gpg() const;
   [[nodiscard]] SecurityVerificationResult verify_ssh() const;
+
+  // Verifies that the calling process is an untampered, root-owned AWS CLI v2
+  // (see AwsCliVerifier). `reason`, when given, receives a short diagnostic.
+  [[nodiscard]] SecurityVerificationResult
+  verify_aws(std::string *reason = nullptr) const;
 };
 
 } // namespace methuselah

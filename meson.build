@@ -127,6 +127,8 @@ config_h = configure_file(
 # Source files
 sources = files(
     'src/application.cpp',
+    'src/aws_credentials.cpp',
+    'src/aws_verifier.cpp',
     'src/config.cpp',
     'src/git_credentials.cpp',
     'src/git_helper.cpp',
@@ -172,3 +174,24 @@ executable(
         '-Wextra',
     ],
 )
+
+# Unit tests (meson test -C .build). Built on demand so the default build
+# stays unchanged; they need neither raylib nor GPG.
+unit_tests = executable(
+    'methuselah-unit-tests',
+    files(
+        'tests/unit/aws_test.cpp',
+        'src/aws_credentials.cpp',
+        'src/aws_verifier.cpp',
+        'src/git_helper.cpp',
+        'src/process_info.cpp',
+        'src/security.cpp',
+        'src/ssh_helper.cpp',
+    ),
+    dependencies: [spdlog_dep, sodium_dep],
+    include_directories: include_directories('include'),
+    cpp_args: ['-Wall', '-Wextra'],
+    build_by_default: false,
+    install: false,
+)
+test('aws credential helper', unit_tests)
