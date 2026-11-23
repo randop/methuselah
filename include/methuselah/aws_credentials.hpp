@@ -1,14 +1,16 @@
 #pragma once
 
 #include "methuselah/secure_memory.hpp"
-#include "methuselah/security.hpp"
 
 #include <ctime>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 namespace methuselah {
+
+struct AwsParseResult;
 
 // Credentials in the format AWS CLI's `credential_process` expects.
 //
@@ -48,12 +50,11 @@ public:
     return *this;
   }
 
-  // Parses credentials into `credentials` and returns a SecurityVerdict.
-  // On failure, `credentials` remains empty. Credentials whose expiration is
-  // not after `now` are refused.
-  [[nodiscard]] static SecurityVerdict
-  parse(std::string_view text, AwsCredentials &credentials,
-        std::time_t now = std::time(nullptr));
+  // Parses credentials and returns a result with a standard error condition,
+  // a short reason, and the parsed credentials. On failure `credentials` is
+  // empty. Credentials whose expiration is not after `now` are refused.
+  [[nodiscard]] static AwsParseResult
+  parse(std::string_view text, std::time_t now = std::time(nullptr));
 
   // {"Version":1,"AccessKeyId":...} followed by a newline, in guarded memory.
   [[nodiscard]] SecureString to_credential_process_json() const;
@@ -76,6 +77,15 @@ private:
   SecureString secret_access_key_;
   SecureString session_token_;
   std::string expiration_;
+};
+
+// Outcome of AwsCredentials::parse(): a standard error condition plus a short
+// reason, mirroring SecurityVerdict, together with the parsed credentials.
+// `reason` is a view and owns nothing, so it must outlive the result.
+struct AwsParseResult {
+  std::errc result = std::errc::io_error;
+  std::string_view reason{};
+  AwsCredentials credentials;
 };
 
 } // namespace methuselah

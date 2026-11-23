@@ -84,10 +84,7 @@ std::optional<std::time_t> parse_expiration(const std::string &value) {
 
 } // namespace
 
-SecurityVerdict AwsCredentials::parse(std::string_view text,
-                                      AwsCredentials &credentials,
-                                      std::time_t now) {
-  credentials = AwsCredentials{};
+AwsParseResult AwsCredentials::parse(std::string_view text, std::time_t now) {
   AwsCredentials creds;
   bool haveAccess = false;
   bool haveSecret = false;
@@ -106,7 +103,8 @@ SecurityVerdict AwsCredentials::parse(std::string_view text,
     const auto eq = line.find('=');
     if (eq == std::string_view::npos) {
       return {std::errc::invalid_argument,
-              "malformed line in credentials file (expected key=value)"};
+              "malformed line in credentials file (expected key=value)",
+              {}};
     }
     const std::string key = normalize_key(trim(line.substr(0, eq)));
     const std::string_view value = trim(line.substr(eq + 1));
@@ -124,77 +122,88 @@ SecurityVerdict AwsCredentials::parse(std::string_view text,
     if (key == "accesskeyid") {
       if (!assign(creds.access_key_id_, haveAccess)) {
         return {std::errc::invalid_argument,
-                "duplicate key in credentials file"};
+                "duplicate key in credentials file",
+                {}};
       }
     } else if (key == "secretaccesskey") {
       if (!assign(creds.secret_access_key_, haveSecret)) {
         return {std::errc::invalid_argument,
-                "duplicate key in credentials file"};
+                "duplicate key in credentials file",
+                {}};
       }
     } else if (key == "sessiontoken") {
       if (!assign(creds.session_token_, haveToken)) {
         return {std::errc::invalid_argument,
-                "duplicate key in credentials file"};
+                "duplicate key in credentials file",
+                {}};
       }
     } else if (key == "expiration") {
       if (haveExpiry) {
         return {std::errc::invalid_argument,
-                "duplicate expiration in credentials file"};
+                "duplicate expiration in credentials file",
+                {}};
       }
       haveExpiry = true;
       creds.expiration_.assign(value);
     } else {
-      return {std::errc::invalid_argument, "unknown key in credentials file"};
+      return {
+          std::errc::invalid_argument, "unknown key in credentials file", {}};
     }
   }
 
   if (!haveAccess || creds.access_key_id_.empty()) {
     return {std::errc::invalid_argument,
-            "credentials file has no access_key_id"};
+            "credentials file has no access_key_id",
+            {}};
   }
   if (!haveSecret || creds.secret_access_key_.empty()) {
     return {std::errc::invalid_argument,
-            "credentials file has no secret_access_key"};
+            "credentials file has no secret_access_key",
+            {}};
   }
 
   const std::string_view access = creds.access_key_id_;
   if (access.size() < 16 || access.size() > 128 ||
       !all_of_set(access, kUpperAlnum)) {
     return {std::errc::invalid_argument,
-            "access_key_id has an unexpected format"};
+            "access_key_id has an unexpected format",
+            {}};
   }
   const std::string_view secret = creds.secret_access_key_;
   if (secret.size() < 20 || secret.size() > 128 ||
       !all_of_set(secret, kBase64)) {
     return {std::errc::invalid_argument,
-            "secret_access_key has an unexpected format"};
+            "secret_access_key has an unexpected format",
+            {}};
   }
   if (haveToken) {
     const std::string_view token = creds.session_token_;
     if (token.size() < 16 || token.size() > 4096 ||
         !all_of_set(token, kToken)) {
       return {std::errc::invalid_argument,
-              "session_token has an unexpected format"};
+              "session_token has an unexpected format",
+              {}};
     }
   }
   if (haveExpiry) {
     const auto expiry = parse_expiration(creds.expiration_);
     if (!expiry) {
       return {std::errc::invalid_argument,
-              "expiration must look like YYYY-MM-DDTHH:MM:SSZ (UTC)"};
+              "expiration must look like YYYY-MM-DDTHH:MM:SSZ (UTC)",
+              {}};
     }
     if (*expiry <= now) {
-      return {std::errc::invalid_argument, "credentials have expired"};
+      return {std::errc::invalid_argument, "credentials have expired", {}};
     }
   } else if (haveToken) {
     // Temporary credentials with no expiry would be cached by the CLI
     // forever; refuse rather than hand out something that never refreshes.
     return {std::errc::invalid_argument,
-            "temporary credentials (session_token) require an expiration"};
+            "temporary credentials (session_token) require an expiration",
+            {}};
   }
 
-  credentials = std::move(creds);
-  return {std::errc{}, "ok"};
+  return {std::errc{}, "ok", std::move(creds)};
 }
 
 SecureString AwsCredentials::to_credential_process_json() const {

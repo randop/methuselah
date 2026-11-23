@@ -356,10 +356,10 @@ int run_aws_flow(const std::string &profile, pid_t caller,
     return EXIT_FAILURE;
   }
 
-  AwsCredentials credentials;
-  const auto parsed = AwsCredentials::parse(unlocked->plaintext(), credentials);
-  if (!parsed.passed()) {
-    std::cerr << "Error: " << parsed.reason << std::endl;
+  const auto [ec, reason, credentials] =
+      AwsCredentials::parse(unlocked->plaintext());
+  if (ec != std::errc{}) {
+    std::cerr << "Error: " << reason << std::endl;
     return EXIT_FAILURE;
   }
 
