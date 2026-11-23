@@ -139,12 +139,20 @@ And this to `~/.config/pinentry.methuselah`:
 gpgfile=~/.aws/default.credentials.gpg
 ```
 
-Run:
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:c15fb252e96033c049b48d9c08855fc99881c0554f7960ba8ffafa2db8871495 -->
+
+Clear any exported AWS credentials before running the check so the CLI uses
+the profile's credential helper:
 
 ```bash
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 GNUPGHOME="${GNUPGHOME:-$HOME/.gnupg}" HOME=/etc/methuselah/aws-home \
   aws sts get-caller-identity
 ```
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 #### Single non-default profile setup
 
