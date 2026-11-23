@@ -71,8 +71,10 @@ bool name_matches(std::string_view name, std::string_view pattern) {
   return name == pattern;
 }
 
+constexpr std::size_t kSha256HexLength = 64;
+
 bool is_hex_digest(std::string_view text) {
-  return text.size() == 64 &&
+  return text.size() == kSha256HexLength &&
          std::all_of(text.begin(), text.end(),
                      [](unsigned char c) { return std::isxdigit(c) != 0; });
 }
@@ -306,9 +308,14 @@ AwsCliVerifier::parse_pin_file(std::string_view text) {
     if (!is_hex_digest(digest)) {
       return std::nullopt;
     }
-    std::string lowered(digest);
-    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    // Build the lowercase copy element by element. Copy-constructing from the
+    // view and transforming in place makes GCC (-Wstringop-overread, LTO)
+    // lose the 64-character bound that is_hex_digest() just established.
+    std::string lowered(kSha256HexLength, '\0');
+    for (std::size_t i = 0; i < kSha256HexLength; ++i) {
+      lowered[i] = static_cast<char>(
+          std::tolower(static_cast<unsigned char>(digest[i])));
+    }
     digests.push_back(std::move(lowered));
   }
   if (digests.empty()) {
