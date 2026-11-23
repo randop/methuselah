@@ -31,7 +31,9 @@ Run the script again to update an existing install and refresh the pin.
 The steps below use `gpg` directly. If you use `pass` and prefer to have the
 AWS CLI write the profile entries, see
 [Setup with `pass` and `aws configure`](#setup-with-pass-and-aws-configure)
-for an alternative to steps 1–3.
+for an alternative to steps 1–3. To avoid prefixing `GNUPGHOME` and `HOME`
+on every command, see
+[Running `aws` without env vars](#running-aws-without-env-vars).
 
 ### 1. Encrypt the credentials
 
@@ -139,10 +141,6 @@ And this to `~/.config/pinentry.methuselah`:
 gpgfile=~/.aws/default.credentials.gpg
 ```
 
-<!-- coderabbit-ai-generated:v1 -->
-
-<!-- coderabbit-ai-generated-section:v1:c15fb252e96033c049b48d9c08855fc99881c0554f7960ba8ffafa2db8871495 -->
-
 Clear any exported AWS credentials before running the check so the CLI uses
 the profile's credential helper:
 
@@ -151,8 +149,6 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 GNUPGHOME="${GNUPGHOME:-$HOME/.gnupg}" HOME=/etc/methuselah/aws-home \
   aws sts get-caller-identity
 ```
-
-<!-- /coderabbit-ai-generated:v1 -->
 
 #### Single non-default profile setup
 
@@ -449,6 +445,77 @@ account, user, and ARN for the credential set.
   file's recipients is in the keyring named by `GNUPGHOME`.
 - The AWS CLI refuses the environment: unset `AWS_CONFIG_FILE` and
   `AWS_SHARED_CREDENTIALS_FILE`, and leave `LD_LIBRARY_PATH` unset.
+
+## Running `aws` without env vars
+
+Every command above prefixes `GNUPGHOME` and `HOME`. Both are required:
+the AWS CLI reads its config from `$HOME/.aws/config`, and the helper
+verifies that the caller's `HOME` is a root-controlled directory, so it must
+be `/etc/methuselah/aws-home`. GnuPG would otherwise look for the keyring
+under that AWS home, so `GNUPGHOME` points at your real keyring. The helper
+itself ignores `HOME` for its own files and resolves `~/.config` and the
+`gpgfile` paths from the password database, so overriding `HOME` does not
+break its configuration.
+
+Use one of the shortcuts below to avoid typing both on every command.
+
+### 1. Shell function
+
+Add this to `~/.bashrc` or `~/.zshrc` and open a new shell:
+
+```bash
+aws() {
+  GNUPGHOME="${GNUPGHOME:-$HOME/.gnupg}" HOME=/etc/methuselah/aws-home \
+    command aws "$@"
+}
+```
+
+`command aws` avoids recursion into the function. If you export
+`GNUPGHOME` once in your shell startup file, the function only needs to set
+`HOME`:
+
+```bash
+export GNUPGHOME="$HOME/.gnupg"
+aws() {
+  HOME=/etc/methuselah/aws-home command aws "$@"
+}
+```
+
+Set `AWS_PROFILE=prod` in the same startup file if you always want one
+profile, so `--profile` is not needed either.
+
+### 2. Wrapper script
+
+Create `~/.local/bin/aws-methuselah` with the real CLI path and executable
+mode:
+
+```bash
+#!/usr/bin/env bash
+GNUPGHOME="${GNUPGHOME:-$HOME/.gnupg}" HOME=/etc/methuselah/aws-home \
+  exec /usr/local/bin/aws "$@"
+```
+
+```bash
+chmod +x ~/.local/bin/aws-methuselah
+```
+
+Run `aws-methuselah sts get-caller-identity` instead of `aws`. Do not name
+the wrapper `aws` unless it calls the real binary by absolute path, or it
+will call itself recursively. The wrapper's environment is inherited by the
+real AWS CLI, so the helper still sees the same verified caller.
+
+For scripts and Makefiles, either call the wrapper or prefix the command
+directly:
+
+```bash
+GNUPGHOME="${GNUPGHOME:-$HOME/.gnupg}" HOME=/etc/methuselah/aws-home \
+  aws --profile prod sts get-caller-identity
+```
+
+These shortcuts only change how the environment is set. The helper still
+verifies the AWS CLI binary, its root-controlled `HOME`, the absence of
+forbidden overrides such as `AWS_CONFIG_FILE` and `LD_LIBRARY_PATH`, and the
+optional pin.
 
 ## What is verified
 
