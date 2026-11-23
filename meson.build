@@ -43,7 +43,7 @@ xi_dep = dependency('xi')
 xrandr_dep = dependency('xrandr')
 xcursor_dep = dependency('xcursor')
 
-gpgme_dep = dependency('gpgme', required: true, version: '>=2.2.0', static: true)
+gpgme_dep = dependency('gpgme', required: true, version: '>=2.3.1', static: true)
 
 gpgerror_dep = dependency(
     'gpg-error',

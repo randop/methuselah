@@ -12,7 +12,8 @@ namespace methuselah {
 
 GitPredicate::GitPredicate(const GitPredicate &other)
     : capabilities_(other.capabilities_), wwwauth_(other.wwwauth_),
-      protocol_(other.protocol_), host_(other.host_), username_(other.username_) {
+      protocol_(other.protocol_), host_(other.host_),
+      username_(other.username_) {
   if (!other.password_.empty()) {
     secure_reserve(password_, other.password_.size());
     password_.assign(other.password_);

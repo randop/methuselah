@@ -142,11 +142,14 @@ export PKG_CONFIG_PATH="${OPT_PREFIX}/libassuan/current/lib/pkgconfig:${PKG_CONF
 export PATH="${OPT_PREFIX}/libgpg-error/current/bin:$PATH"
 
 # ---------------------------------------------------------------------------
-# gpgme 2.2.0
+# gpgme
 # ---------------------------------------------------------------------------
-GPGME_VERSION=2.2.0
-GPGME_TAG=gpgme-2.2.0
-if [ ! -f "${OPT_PREFIX}/gpgme/current/lib/libgpgme.a" ]; then
+GPGME_VERSION=2.3.1
+GPGME_TAG=gpgme-2.3.1
+GPGME_PC=${OPT_PREFIX}/gpgme/current/lib/pkgconfig/gpgme.pc
+if [ ! -f "${OPT_PREFIX}/gpgme/current/lib/libgpgme.a" ] ||
+   [ ! -f "${GPGME_PC}" ] ||
+   ! pkg-config --atleast-version="${GPGME_VERSION}" "${GPGME_PC}"; then
   echo "Compiling gpgme ${GPGME_VERSION} ..."
   mkdir -p ${OPT_PREFIX}/gpgme/current
   rm -rf ${OPT_PREFIX}/gpgme/current/*
@@ -171,7 +174,7 @@ if [ ! -f "${OPT_PREFIX}/gpgme/current/lib/libgpgme.a" ]; then
     MAKEINFO=true
   make -j$(nproc)
   make install
-  rm -f ${LOCAL_PKGCONFIG}/gpgme.pc
+  rm -f "${LOCAL_PKGCONFIG}/gpgme.pc"
   echo "Checking compiled gpgme..." &&
     file ${OPT_PREFIX}/gpgme/current/lib/libgpgme.a
 else
@@ -179,8 +182,7 @@ else
 fi
 
 if [ ! -f "${LOCAL_PKGCONFIG}/gpgme.pc" ]; then
-  ln -sv ${OPT_PREFIX}/gpgme/current/lib/pkgconfig/gpgme.pc \
-    ${LOCAL_PKGCONFIG}/gpgme.pc
+  ln -sv "${GPGME_PC}" "${LOCAL_PKGCONFIG}/gpgme.pc"
 fi
 export CMAKE_PREFIX_PATH="${OPT_PREFIX}/gpgme/current:${CMAKE_PREFIX_PATH}"
 export PKG_CONFIG_PATH="${OPT_PREFIX}/gpgme/current/lib/pkgconfig:${PKG_CONFIG_PATH}"
