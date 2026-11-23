@@ -5,7 +5,7 @@
 // Run with: meson test -C .build
 
 #include "methuselah/aws_credentials.hpp"
-#include "methuselah/aws_verifier.hpp"
+#include "methuselah/aws_cli_verifier.hpp"
 #include "methuselah/security.hpp"
 
 #include <sodium.h>
@@ -58,23 +58,24 @@ std::string creds_text(const std::string &extra = "") {
 }
 
 bool parse_ok(const std::string &text) {
-  std::string error;
-  return AwsCredentials::parse(text, error, kNow).has_value();
+  AwsCredentials credentials;
+  return AwsCredentials::parse(text, credentials, kNow).passed();
 }
 
 std::string parse_error(const std::string &text) {
-  std::string error;
-  const auto creds = AwsCredentials::parse(text, error, kNow);
-  return creds ? std::string{} : error;
+  AwsCredentials credentials;
+  const auto verdict = AwsCredentials::parse(text, credentials, kNow);
+  return verdict.passed() ? std::string{} : std::string(verdict.reason);
 }
 
 void test_credentials() {
   {
-    std::string error;
-    auto creds = AwsCredentials::parse(creds_text(), error, kNow);
-    CHECK(creds.has_value());
-    CHECK(!creds->has_session_token());
-    const std::string json(creds->to_credential_process_json());
+    AwsCredentials creds;
+    const auto verdict = AwsCredentials::parse(creds_text(), creds, kNow);
+    CHECK(verdict.passed());
+    CHECK(verdict.result == std::errc{});
+    CHECK(!creds.has_session_token());
+    const std::string json(creds.to_credential_process_json());
     CHECK(json == std::string("{\"Version\":1,\"AccessKeyId\":\"") + kAccess +
                       "\",\"SecretAccessKey\":\"" + kSecret + "\"}\n");
   }
@@ -85,15 +86,27 @@ void test_credentials() {
                              kAccess + "\r\naws_secret_access_key=" + kSecret +
                              "\r\nAWS_SESSION_TOKEN=" + kToken +
                              "\r\nExpiration=2030-01-01T00:00:00Z\r\n";
-    std::string error;
-    auto creds = AwsCredentials::parse(text, error, kNow);
-    CHECK(creds.has_value());
-    CHECK(creds->has_session_token());
-    const std::string json(creds->to_credential_process_json());
+    AwsCredentials creds;
+    const auto verdict = AwsCredentials::parse(text, creds, kNow);
+    CHECK(verdict.passed());
+    CHECK(verdict.result == std::errc{});
+    CHECK(creds.has_session_token());
+    const std::string json(creds.to_credential_process_json());
     CHECK(json.find("\"SessionToken\":\"") != std::string::npos);
     CHECK(json.find("\"Expiration\":\"2030-01-01T00:00:00Z\"") !=
           std::string::npos);
     CHECK(json.back() == '\n');
+  }
+
+  {
+    AwsCredentials credentials;
+    CHECK(AwsCredentials::parse(creds_text(), credentials, kNow).passed());
+    const auto verdict = AwsCredentials::parse("", credentials, kNow);
+    CHECK(verdict.result == std::errc::invalid_argument);
+    CHECK(!verdict.passed());
+    const SecureString json = credentials.to_credential_process_json();
+    CHECK(json == "{\"Version\":1,\"AccessKeyId\":\"\","
+                 "\"SecretAccessKey\":\"\"}\n");
   }
 
   CHECK(!parse_ok(""));

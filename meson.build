@@ -128,7 +128,7 @@ config_h = configure_file(
 sources = files(
     'src/application.cpp',
     'src/aws_credentials.cpp',
-    'src/aws_verifier.cpp',
+    'src/aws_cli_verifier.cpp',
     'src/config.cpp',
     'src/git_credentials.cpp',
     'src/git_helper.cpp',
@@ -182,7 +182,7 @@ unit_tests = executable(
     files(
         'tests/unit/aws_test.cpp',
         'src/aws_credentials.cpp',
-        'src/aws_verifier.cpp',
+        'src/aws_cli_verifier.cpp',
         'src/git_helper.cpp',
         'src/process_info.cpp',
         'src/security.cpp',

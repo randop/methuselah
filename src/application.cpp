@@ -356,10 +356,10 @@ int run_aws_flow(const std::string &profile, pid_t caller,
     return EXIT_FAILURE;
   }
 
-  std::string error;
-  auto credentials = AwsCredentials::parse(unlocked->plaintext(), error);
-  if (!credentials) {
-    std::cerr << "Error: " << error << std::endl;
+  AwsCredentials credentials;
+  const auto parsed = AwsCredentials::parse(unlocked->plaintext(), credentials);
+  if (!parsed.passed()) {
+    std::cerr << "Error: " << parsed.reason << std::endl;
     return EXIT_FAILURE;
   }
 
@@ -377,7 +377,7 @@ int run_aws_flow(const std::string &profile, pid_t caller,
     return EXIT_FAILURE;
   }
 
-  SecureString json = credentials->to_credential_process_json();
+  SecureString json = credentials.to_credential_process_json();
   std::cout.flush();
   const bool written = secure_write(STDOUT_FILENO, json);
   secure_clear(json);

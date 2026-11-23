@@ -1,11 +1,12 @@
 #pragma once
 
 #include "methuselah/secure_memory.hpp"
+#include "methuselah/security.hpp"
 
 #include <ctime>
-#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace methuselah {
 
@@ -47,10 +48,11 @@ public:
     return *this;
   }
 
-  // On failure returns nullopt and sets `error` (never containing a value).
-  // Credentials whose expiration is not after `now` are refused.
-  [[nodiscard]] static std::optional<AwsCredentials>
-  parse(std::string_view text, std::string &error,
+  // Parses credentials into `credentials` and returns a SecurityVerdict.
+  // On failure, `credentials` remains empty. Credentials whose expiration is
+  // not after `now` are refused.
+  [[nodiscard]] static SecurityVerdict
+  parse(std::string_view text, AwsCredentials &credentials,
         std::time_t now = std::time(nullptr));
 
   // {"Version":1,"AccessKeyId":...} followed by a newline, in guarded memory.

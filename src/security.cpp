@@ -1,6 +1,6 @@
 #include "config.h"
 
-#include "methuselah/aws_verifier.hpp"
+#include "methuselah/aws_cli_verifier.hpp"
 #include "methuselah/git_helper.hpp"
 #include "methuselah/process_info.hpp"
 #include "methuselah/security.hpp"
