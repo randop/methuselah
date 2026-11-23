@@ -96,8 +96,10 @@ void test_credentials() {
   CHECK(!parse_ok(""));
   CHECK(!parse_ok(std::string("access_key_id=") + kAccess + "\n"));
   CHECK(!parse_ok(std::string("secret_access_key=") + kSecret + "\n"));
-  CHECK(parse_error(creds_text("extra=1\n")).find("unknown key") !=
-        std::string::npos);
+  CHECK(parse_error(creds_text("extra=1\n")) ==
+        "unknown key in credentials file");
+  CHECK(parse_error(creds_text(std::string(kSecret) + "=1\n")) ==
+        "unknown key in credentials file");
   CHECK(parse_error(creds_text(std::string("access_key_id=") + kAccess + "\n"))
             .find("duplicate") != std::string::npos);
   CHECK(!parse_ok(creds_text("not a pair\n")));
@@ -125,6 +127,15 @@ void test_credentials() {
   CHECK(!parse_ok(creds_text("expiration=tomorrow\n")));
   CHECK(!parse_ok(creds_text("expiration=2030-01-01 00:00:00\n")));
   CHECK(parse_ok(creds_text("expiration=2030-01-01T00:00:00Z\n")));
+  CHECK(parse_ok(creds_text("expiration=2032-02-29T00:00:00Z\n")));
+  for (const char *invalid : {"2030-02-29T00:00:00Z", "2030-04-31T00:00:00Z",
+                              "2030-01-01T00:00:60Z", "2030-1-01T00:00:000Z",
+                              "2030-01-01T00:00:00ZZ", "2030- 1-01T00:00:00Z"}) {
+    CHECK(!parse_ok(creds_text(std::string("expiration=") + invalid + "\n")));
+  }
+  std::string nul_expiry = "expiration=2030-01-01T00:00:00Z";
+  nul_expiry[18] = '\0';
+  CHECK(!parse_ok(creds_text(nul_expiry)));
   // A token without an expiry would be cached by the CLI forever.
   CHECK(!parse_ok(creds_text(std::string("session_token=") + kToken + "\n")));
 
@@ -156,6 +167,19 @@ void test_environment() {
       CHECK(std::string(bad).starts_with(*hit));
     }
   }
+
+  const std::string bundle = "/usr/local/aws-cli/v2/2.0/dist";
+  const std::string bundled = clean + "LD_LIBRARY_PATH=" + bundle + '\0';
+  CHECK(!V::forbidden_environment(bundled, bundle));
+  CHECK(V::forbidden_environment(bundled));
+  CHECK(V::forbidden_environment(bundled + "LD_LIBRARY_PATH_ORIG=" + bundle,
+                                 bundle) == "LD_LIBRARY_PATH_ORIG");
+  CHECK(V::forbidden_environment(bundled + "LD_LIBRARY_PATH=" + bundle,
+                                 bundle) == "LD_LIBRARY_PATH");
+  CHECK(V::forbidden_environment(clean + "LD_LIBRARY_PATH=" + bundle + ":/tmp",
+                                 bundle) == "LD_LIBRARY_PATH");
+  CHECK(V::forbidden_environment(bundled + "LD_AUDIT=/tmp/x.so", bundle) ==
+        "LD_AUDIT");
 
   // Names must match; look-alikes and values must not.
   CHECK(!V::forbidden_environment(std::string("MY_LD_PRELOAD=1") + '\0')
@@ -226,6 +250,8 @@ void test_trusted_file() {
   // Root-owned system files qualify even when not executable...
   CHECK(Security::trusted_file("/etc/passwd").has_value());
   CHECK(!Security::trusted_executable("/etc/passwd").has_value());
+  CHECK(Security::trusted_directory("/etc").has_value());
+  CHECK(!Security::trusted_directory("/etc/passwd").has_value());
   // ...a file under a world-writable directory never does, nor does a
   // relative path or a missing file.
   char dir[] = "/tmp/methuselah-trust-XXXXXX";
@@ -233,6 +259,7 @@ void test_trusted_file() {
   const std::string lib = std::string(dir) + "/lib.so";
   std::ofstream(lib) << "x";
   CHECK(!Security::trusted_file(lib).has_value());
+  CHECK(!Security::trusted_directory(dir).has_value());
   CHECK(!Security::trusted_file("etc/passwd").has_value());
   CHECK(!Security::trusted_file("/etc/does-not-exist").has_value());
   ::unlink(lib.c_str());
@@ -346,7 +373,7 @@ void test_verify() {
   options.required_name = shell->filename().string();
   const AwsCliVerifier verifier(options);
   const std::vector<std::string> sh_args = {"sh", "-c", "sleep 10; true"};
-  const std::vector<std::string> clean_env = {"HOME=/nonexistent",
+  const std::vector<std::string> clean_env = {"HOME=/",
                                               "AWS_PROFILE=p"};
 
   {
@@ -358,6 +385,20 @@ void test_verify() {
                    verdict.reason.c_str());
     }
     CHECK(verdict.result == Result::passed);
+
+    // A non-directory component yields ENOTDIR, not an absent pin.
+    auto bad_pin = options;
+    bad_pin.pin_file = "/dev/null/aws-cli.sha256";
+    const auto pin_verdict = AwsCliVerifier(bad_pin).verify(ok.pid);
+    CHECK(pin_verdict.result == Result::faulted);
+    CHECK(pin_verdict.reason == "cannot inspect AWS CLI pin file");
+  }
+  {
+    Child bad = spawn(shell->string(), sh_args, {"HOME=/tmp"});
+    CHECK(wait_for_exec(bad.pid, shell->string()));
+    const auto verdict = verifier.verify(bad.pid);
+    CHECK(verdict.result == Result::failed);
+    CHECK(verdict.reason.find("root controlled") != std::string::npos);
   }
   {
     auto env = clean_env;

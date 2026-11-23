@@ -73,6 +73,10 @@ public:
     return gpgme_data_new_from_file(&data_, path, 1);
   }
 
+  [[nodiscard]] gpgme_error_t from_fd(int fd) {
+    return gpgme_data_new_from_fd(&data_, fd);
+  }
+
   [[nodiscard]] gpgme_error_t create() { return gpgme_data_new(&data_); }
 
   [[nodiscard]] gpgme_data_t get() const noexcept { return data_; }
@@ -81,10 +85,8 @@ private:
   gpgme_data_t data_ = nullptr;
 };
 
-} // namespace
-
-DecryptResult GpgDecryptor::decrypt_file(const std::filesystem::path &gpg_path,
-                                         const SecureString &passphrase) const {
+template <typename OpenCipher>
+DecryptResult decrypt(const SecureString &passphrase, OpenCipher open_cipher) {
   DecryptResult result;
 
   gpgme_check_version(nullptr);
@@ -102,7 +104,7 @@ DecryptResult GpgDecryptor::decrypt_file(const std::filesystem::path &gpg_path,
                           const_cast<SecureString *>(&passphrase));
 
   GpgmeData cipher;
-  gpgme_error_t err = cipher.from_file(gpg_path.c_str());
+  gpgme_error_t err = open_cipher(cipher);
   if (err) {
     result.set_error(gpgme_strerror(err));
     return result;
@@ -132,6 +134,25 @@ DecryptResult GpgDecryptor::decrypt_file(const std::filesystem::path &gpg_path,
   secure_clear(buf, sizeof(buf));
   result.set_plaintext(std::move(plaintext));
   return result;
+}
+
+} // namespace
+
+DecryptResult GpgDecryptor::decrypt_file(const std::filesystem::path &gpg_path,
+                                         const SecureString &passphrase) const {
+  return decrypt(passphrase, [&](GpgmeData &cipher) {
+    return cipher.from_file(gpg_path.c_str());
+  });
+}
+
+DecryptResult GpgDecryptor::decrypt_fd(int fd,
+                                       const SecureString &passphrase) const {
+  if (::lseek(fd, 0, SEEK_SET) == -1) {
+    DecryptResult result;
+    result.set_error("cannot rewind encrypted credentials");
+    return result;
+  }
+  return decrypt(passphrase, [&](GpgmeData &cipher) { return cipher.from_fd(fd); });
 }
 
 } // namespace methuselah

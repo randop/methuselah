@@ -1,13 +1,17 @@
 #include "methuselah/instance_lock.hpp"
 
 #include "config.h"
+#include "methuselah/signal_guard.hpp"
 
 #include <cerrno>
+#include <csignal>
 #include <cstdlib>
 #include <fcntl.h>
 #include <iostream>
+#include <poll.h>
 #include <string>
 #include <sys/file.h>
+#include <time.h>
 #include <unistd.h>
 
 namespace methuselah {
@@ -27,13 +31,36 @@ InstanceLock::InstanceLock(Mode mode) {
   }
 
   if (mode == Mode::wait) {
-    int rc;
-    do {
-      rc = ::flock(fd_, LOCK_EX);
-    } while (rc != 0 && errno == EINTR);
-    if (rc == 0) {
-      acquired_ = true;
-      return;
+    sigset_t cancellation, original;
+    ::sigemptyset(&cancellation);
+    ::sigaddset(&cancellation, SIGINT);
+    ::sigaddset(&cancellation, SIGTERM);
+    if (::sigprocmask(SIG_BLOCK, &cancellation, &original) == 0) {
+      bool locked = false;
+      while (!SignalGuard::received()) {
+        if (::flock(fd_, LOCK_EX | LOCK_NB) == 0) {
+          locked = true;
+          break;
+        }
+        if (errno == EINTR) {
+          continue;
+        }
+        if (errno != EWOULDBLOCK) {
+          break;
+        }
+        // flock has no pollable readiness. Retry on a short timer and restore
+        // the original signal mask atomically while waiting for cancellation.
+        const timespec retry_delay{0, 20'000'000};
+        if (::ppoll(nullptr, 0, &retry_delay, &original) == -1 &&
+            errno != EINTR) {
+          break;
+        }
+      }
+      if (::sigprocmask(SIG_SETMASK, &original, nullptr) == 0 && locked &&
+          !SignalGuard::received()) {
+        acquired_ = true;
+        return;
+      }
     }
     ::close(fd_);
     fd_ = -1;

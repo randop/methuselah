@@ -30,8 +30,10 @@ void report(const ProcessInfo::Entry &e, const char *label) {
 
 namespace {
 
+enum class PathKind { file, executable, directory };
+
 std::optional<std::filesystem::path>
-trusted_path(const std::filesystem::path &candidate, bool requireExecutable) {
+trusted_path(const std::filesystem::path &candidate, PathKind kind) {
   if (!candidate.is_absolute()) {
     return std::nullopt;
   }
@@ -88,8 +90,10 @@ trusted_path(const std::filesystem::path &candidate, bool requireExecutable) {
     resolved = next;
   }
 
-  if (::stat(resolved.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
-      (requireExecutable && ::access(resolved.c_str(), X_OK) != 0)) {
+  if (::stat(resolved.c_str(), &info) != 0 ||
+      (kind == PathKind::directory ? !S_ISDIR(info.st_mode)
+                                   : !S_ISREG(info.st_mode)) ||
+      (kind == PathKind::executable && ::access(resolved.c_str(), X_OK) != 0)) {
     return std::nullopt;
   }
   return resolved;
@@ -99,12 +103,17 @@ trusted_path(const std::filesystem::path &candidate, bool requireExecutable) {
 
 std::optional<std::filesystem::path>
 Security::trusted_executable(const std::filesystem::path &candidate) {
-  return trusted_path(candidate, true);
+  return trusted_path(candidate, PathKind::executable);
 }
 
 std::optional<std::filesystem::path>
 Security::trusted_file(const std::filesystem::path &candidate) {
-  return trusted_path(candidate, false);
+  return trusted_path(candidate, PathKind::file);
+}
+
+std::optional<std::filesystem::path>
+Security::trusted_directory(const std::filesystem::path &candidate) {
+  return trusted_path(candidate, PathKind::directory);
 }
 
 SecurityVerificationResult Security::verify_git() const {

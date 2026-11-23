@@ -30,6 +30,7 @@
 #include <string>
 #include <string_view>
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -213,11 +214,29 @@ bool valid_profile_name(std::string_view name) {
          });
 }
 
+class CredentialFile {
+public:
+  explicit CredentialFile(const std::filesystem::path &path)
+      : fd_(::open(path.c_str(),
+                   O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)) {}
+  ~CredentialFile() {
+    if (fd_ >= 0) {
+      ::close(fd_);
+    }
+  }
+  CredentialFile(const CredentialFile &) = delete;
+  CredentialFile &operator=(const CredentialFile &) = delete;
+  [[nodiscard]] int get() const { return fd_; }
+
+private:
+  int fd_;
+};
+
 // Anyone who can replace the encrypted file can encrypt their own keys to the
 // user's public key and make the AWS CLI talk to their account instead.
-bool credential_file_is_private(const std::filesystem::path &path) {
+bool credential_file_is_private(int fd) {
   struct stat info{};
-  return ::stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode) &&
+  return ::fstat(fd, &info) == 0 && S_ISREG(info.st_mode) &&
          info.st_uid == ::getuid() && (info.st_mode & (S_IWGRP | S_IWOTH)) == 0;
 }
 
@@ -244,16 +263,17 @@ std::optional<std::filesystem::path> aws_gpg_path(const std::string &profile) {
               << config_path.string() << std::endl;
     return std::nullopt;
   }
-  return resolve_path(*gpg_file);
+  // Keep the final component intact so open() can reject a symlink.
+  return resolve_path(*gpg_file, false);
 }
 
 // Reuses an unlocked gpg-agent when possible, otherwise asks for the
 // passphrase. Unlike the git flow, cancelling is a failure: the CLI must not
 // see an empty, "successful" reply.
 std::optional<DecryptResult>
-unlock_credentials(const GpgDecryptor &decryptor,
+unlock_credentials(const GpgDecryptor &decryptor, int fd,
                    const std::filesystem::path &file) {
-  auto remembered = decryptor.decrypt_file(file, SecureString{});
+  auto remembered = decryptor.decrypt_fd(fd, SecureString{});
   if (remembered.ok()) {
     return remembered;
   }
@@ -273,7 +293,7 @@ unlock_credentials(const GpgDecryptor &decryptor,
     if (!password) {
       break;
     }
-    auto result = decryptor.decrypt_file(file, *password);
+    auto result = decryptor.decrypt_fd(fd, *password);
     secure_clear(*password);
     if (result.ok()) {
       return result;
@@ -304,7 +324,9 @@ int run_aws_flow(const std::string &profile, pid_t caller,
   if (!gpg_path) {
     return EXIT_FAILURE;
   }
-  if (!credential_file_is_private(*gpg_path)) {
+  const CredentialFile file(*gpg_path);
+  if (!credential_file_is_private(file.get()) ||
+      ::fcntl(file.get(), F_SETFL, 0) == -1) {
     std::cerr << "Error: " << gpg_path->string()
               << " must be a regular file owned by you and not writable by "
                  "group or others"
@@ -313,7 +335,7 @@ int run_aws_flow(const std::string &profile, pid_t caller,
   }
 
   GpgDecryptor decryptor;
-  auto unlocked = unlock_credentials(decryptor, *gpg_path);
+  auto unlocked = unlock_credentials(decryptor, file.get(), *gpg_path);
   if (!unlocked) {
     std::cerr << "Error: could not unlock aws credentials for profile "
               << profile << std::endl;

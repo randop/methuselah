@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstddef>
 #include <ctime>
 
@@ -52,15 +53,31 @@ constexpr std::string_view kToken =
 
 // Strict "YYYY-MM-DDTHH:MM:SSZ". Returns the instant as UTC epoch seconds.
 std::optional<std::time_t> parse_expiration(const std::string &value) {
-  if (value.size() != 20 || value.back() != 'Z') {
+  constexpr std::string_view syntax = "dddd-dd-ddTdd:dd:ddZ";
+  if (value.size() != syntax.size()) {
     return std::nullopt;
+  }
+  for (std::size_t i = 0; i < syntax.size(); ++i) {
+    if (syntax[i] == 'd' ? value[i] < '0' || value[i] > '9'
+                         : value[i] != syntax[i]) {
+      return std::nullopt;
+    }
   }
   struct tm parts{};
   const char *end = ::strptime(value.c_str(), "%Y-%m-%dT%H:%M:%SZ", &parts);
-  if (end == nullptr || *end != '\0') {
+  if (end != value.data() + value.size()) {
     return std::nullopt;
   }
-  return ::timegm(&parts);
+  const auto parsed = parts;
+  errno = 0;
+  const auto epoch = ::timegm(&parts);
+  if (errno == EOVERFLOW || parts.tm_year != parsed.tm_year ||
+      parts.tm_mon != parsed.tm_mon || parts.tm_mday != parsed.tm_mday ||
+      parts.tm_hour != parsed.tm_hour || parts.tm_min != parsed.tm_min ||
+      parts.tm_sec != parsed.tm_sec) {
+    return std::nullopt;
+  }
+  return epoch;
 }
 
 } // namespace
@@ -122,7 +139,7 @@ std::optional<AwsCredentials> AwsCredentials::parse(std::string_view text,
       haveExpiry = true;
       creds.expiration_.assign(value);
     } else {
-      error = "unknown key '" + key + "' in credentials file";
+      error = "unknown key in credentials file";
       return std::nullopt;
     }
   }

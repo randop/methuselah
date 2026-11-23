@@ -51,6 +51,10 @@ public:
   [[nodiscard]] DecryptResult
   decrypt_file(const std::filesystem::path &gpg_path,
                const SecureString &passphrase) const;
+
+  // Borrows fd and rewinds it before each attempt.
+  [[nodiscard]] DecryptResult decrypt_fd(int fd,
+                                         const SecureString &passphrase) const;
 };
 
 } // namespace methuselah

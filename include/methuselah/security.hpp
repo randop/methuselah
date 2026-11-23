@@ -34,6 +34,9 @@ public:
   [[nodiscard]] static std::optional<std::filesystem::path>
   trusted_file(const std::filesystem::path &candidate);
 
+  [[nodiscard]] static std::optional<std::filesystem::path>
+  trusted_directory(const std::filesystem::path &candidate);
+
   [[nodiscard]] SecurityVerificationResult verify_git() const;
   [[nodiscard]] SecurityVerificationResult verify_gpg() const;
   [[nodiscard]] SecurityVerificationResult verify_ssh() const;

@@ -60,13 +60,25 @@ expiration=2026-11-22T18:00:00Z
 gpgfile=~/.aws/prod.credentials.gpg
 ```
 
-**3. Point the CLI at the helper** in `~/.aws/config` (use the absolute path of
-a root-owned install) and keep no static keys in `~/.aws/credentials`:
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:2e90890118c64766e9a436055f99478b86d407cac5d56ad0ec7efca98be46c14 -->
+
+**3. Point the CLI at the helper.** Have an administrator create
+`/etc/methuselah/aws-home/.aws/config` with root ownership and no group or
+other write access on the file or its directories. Use the absolute path to
+the installed helper:
 
 ```ini
 [profile prod]
 credential_process = /usr/local/bin/methuselah --macro=aws prod
 ```
+
+Run the CLI as your normal user with that directory as its home:
+`HOME=/etc/methuselah/aws-home aws --profile prod …`. Keep static keys out of
+that home's `.aws/credentials` and leave all plugin configuration out of
+its `.aws/config`. The helper still finds its own configuration and encrypted
+file in your account's home directory.
 
 **4. Optional but recommended: pin the CLI binary.** Pinning detects an
 `aws` that was modified in place. Refresh the pin after every AWS CLI upgrade.
@@ -88,13 +100,18 @@ The helper prints nothing and exits non-zero unless the caller:
 - has no tracer attached;
 - was not started with `--endpoint-url`, `--ca-bundle`, `--no-verify-ssl`,
   `--debug`, or `configure export-credentials`;
-- was not started with `LD_*`, `PYTHON*`, `MALLOC_*`, `AWS_ENDPOINT_URL*`,
+- was not started with loader overrides (the official Linux bundle's
+  `LD_LIBRARY_PATH` is allowed only when it names its own trusted directory),
+  `PYTHON*`, `MALLOC_*`, `AWS_ENDPOINT_URL*`,
   `AWS_CA_BUNDLE`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, or common
   CA-bundle (`SSL_CERT_*`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`) variables;
-- maps only root-owned files as executable code.
+- uses a root-controlled configuration path with no `[plugins]` section;
+- maps only trusted files as executable code, apart from libffi trampolines.
 
 The check runs before the passphrase prompt and again just before the
 credentials are written.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ### Limitations
 

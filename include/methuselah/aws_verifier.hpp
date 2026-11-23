@@ -29,10 +29,10 @@ struct AwsVerdict {
 //  4. Its argv does not redirect, weaken, or dump what it does with
 //     credentials (--endpoint-url, --no-verify-ssl, --debug,
 //     `configure export-credentials`, ...).
-//  5. Its start-up environment carries no loader, interpreter, endpoint, or
-//     trust-store overrides.
-//  6. Every executable file mapping is a root-owned file; no deleted or
-//     memfd-backed code.
+//  5. Its start-up environment carries no user-controlled loader, interpreter,
+//     endpoint, or trust-store overrides.
+//  6. Its CLI config is root controlled and has no plugin section.
+//  7. Every executable file mapping is trusted, except libffi trampolines.
 class AwsCliVerifier {
 public:
   struct Options {
@@ -57,9 +57,11 @@ public:
   // Pure helpers, exposed for unit tests.
 
   // `environment` is the raw NUL-separated /proc/<pid>/environ. Returns the
-  // offending variable name.
+  // offending variable name. Pass the official bundle's trusted directory
+  // to allow its exact library path.
   [[nodiscard]] static std::optional<std::string>
-  forbidden_environment(std::string_view environment);
+  forbidden_environment(std::string_view environment,
+                        std::string_view bundle_library_path = {});
 
   // Returns the offending argument.
   [[nodiscard]] static std::optional<std::string>

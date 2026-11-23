@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdlib>
+#include <fstream>
 #include <set>
 #include <string>
 #include <string_view>
@@ -21,6 +22,7 @@ namespace methuselah {
 namespace {
 
 using Result = SecurityVerificationResult;
+constexpr const char *kBundle = "/usr/local/aws-cli/v2/current/dist/aws";
 
 AwsVerdict verdict(Result result, std::string reason) {
   return AwsVerdict{result, std::move(reason)};
@@ -79,6 +81,86 @@ bool same_file(const struct stat &a, const struct stat &b) {
   return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
 }
 
+std::string_view next_entry(std::string_view &environment) {
+  const auto nul = environment.find('\0');
+  const auto entry = environment.substr(0, nul);
+  environment = nul == std::string_view::npos ? std::string_view{}
+                                              : environment.substr(nul + 1);
+  return entry;
+}
+
+bool same_proc_object(pid_t pid, const char *leaf) {
+  struct stat caller{}, self{};
+  return ::stat(proc_link(pid, leaf).c_str(), &caller) == 0 &&
+         ::stat((std::string("/proc/self/") + leaf).c_str(), &self) == 0 &&
+         same_file(caller, self);
+}
+
+AwsVerdict verify_plugin_config(std::string_view environment) {
+  std::optional<std::string_view> home;
+  while (!environment.empty()) {
+    const auto entry = next_entry(environment);
+    if (entry == "HOME" || starts_with(entry, "HOME=")) {
+      if (home || entry == "HOME") {
+        return verdict(Result::faulted, "cannot determine AWS CLI home");
+      }
+      home = entry.substr(5);
+    }
+  }
+  if (!home || home->empty()) {
+    return verdict(Result::faulted, "cannot determine AWS CLI home");
+  }
+
+  // The CLI caches full_config before invoking credential_process. Inspecting
+  // a writable file now cannot tell us what the CLI loaded at startup.
+  const auto trusted_home =
+      Security::trusted_directory(std::filesystem::path(*home));
+  if (!trusted_home) {
+    return verdict(Result::failed, "AWS CLI home must be root controlled");
+  }
+  const auto config_dir = *trusted_home / ".aws";
+  struct stat info{};
+  if (::lstat(config_dir.c_str(), &info) != 0) {
+    if (errno == ENOENT) {
+      return verdict(Result::passed, "ok");
+    }
+    return verdict(Result::faulted, "cannot inspect AWS CLI config directory");
+  }
+  const auto trusted_dir = Security::trusted_directory(config_dir);
+  if (!trusted_dir) {
+    return verdict(Result::faulted,
+                   "cannot establish trust in AWS CLI config directory");
+  }
+  const auto config = *trusted_dir / "config";
+  if (::lstat(config.c_str(), &info) != 0) {
+    return errno == ENOENT
+               ? verdict(Result::passed, "ok")
+               : verdict(Result::faulted, "cannot inspect AWS CLI config file");
+  }
+  const auto trusted_config = Security::trusted_file(config);
+  if (!trusted_config) {
+    return verdict(Result::faulted,
+                   "cannot establish trust in AWS CLI config file");
+  }
+
+  // AWS CLI v2 looks up the exact top-level section "plugins" in full_config.
+  // The shared credentials file only merges entries under "profiles".
+  std::ifstream stream(*trusted_config);
+  if (!stream) {
+    return verdict(Result::faulted, "cannot read AWS CLI config file");
+  }
+  for (std::string line; std::getline(stream, line);) {
+    if (line.find("[plugins]") != std::string::npos) {
+      return verdict(Result::failed,
+                     "AWS CLI plugin configuration is not allowed");
+    }
+  }
+  if (stream.bad() || !stream.eof()) {
+    return verdict(Result::faulted, "cannot read AWS CLI config file");
+  }
+  return verdict(Result::passed, "ok");
+}
+
 // libffi legitimately backs closure trampolines with a memfd.
 bool allowed_special_mapping(std::string_view path) {
   constexpr std::string_view kDeleted = " (deleted)";
@@ -95,7 +177,7 @@ bool allowed_special_mapping(std::string_view path) {
 AwsCliVerifier::Options AwsCliVerifier::default_options() {
   Options options;
   options.candidates = {
-      "/usr/local/aws-cli/v2/current/dist/aws",
+      kBundle,
       "/usr/local/bin/aws",
       "/usr/bin/aws",
   };
@@ -104,13 +186,22 @@ AwsCliVerifier::Options AwsCliVerifier::default_options() {
 }
 
 std::optional<std::string>
-AwsCliVerifier::forbidden_environment(std::string_view environment) {
+AwsCliVerifier::forbidden_environment(std::string_view environment,
+                                      std::string_view bundle_library_path) {
+  bool seen_library_path = false;
   while (!environment.empty()) {
-    const auto nul = environment.find('\0');
-    const std::string_view entry = environment.substr(0, nul);
-    environment = nul == std::string_view::npos ? std::string_view{}
-                                                : environment.substr(nul + 1);
-    const std::string_view name = entry.substr(0, entry.find('='));
+    const auto entry = next_entry(environment);
+    const auto equals = entry.find('=');
+    const auto name = entry.substr(0, equals);
+    if (name == "LD_LIBRARY_PATH" && equals != std::string_view::npos &&
+        !seen_library_path && !bundle_library_path.empty() &&
+        bundle_library_path.find_first_of(":;$") == std::string_view::npos &&
+        entry.substr(equals + 1) == bundle_library_path) {
+      // PyInstaller prepends the bundle directory to any inherited value and
+      // preserves the original in LD_LIBRARY_PATH_ORIG, which stays forbidden.
+      seen_library_path = true;
+      continue;
+    }
     for (const auto pattern : kForbiddenEnvironment) {
       if (name_matches(name, pattern)) {
         return std::string(name);
@@ -351,6 +442,8 @@ AwsVerdict AwsCliVerifier::verify(pid_t pid) const {
                      "AWS CLI does not match its pinned SHA-256 (modified or "
                      "upgraded without refreshing the pin)");
     }
+  } else if (errno != ENOENT) {
+    return verdict(Result::faulted, "cannot inspect AWS CLI pin file");
   }
 
   const auto args = ProcessInfo::argv(pid);
@@ -365,9 +458,24 @@ AwsVerdict AwsCliVerifier::verify(pid_t pid) const {
   if (!environment) {
     return verdict(Result::faulted, "cannot read caller environment");
   }
-  if (const auto bad = forbidden_environment(*environment)) {
+  if (!same_proc_object(pid, "root") || !same_proc_object(pid, "ns/mnt")) {
+    return verdict(Result::faulted, "cannot verify caller filesystem context");
+  }
+  // The official Linux onedir bundle uses contents_directory='.'; its
+  // bootloader sets LD_LIBRARY_PATH to the actual executable directory.
+  std::string bundle_library_path;
+  if (const auto bundle = Security::trusted_executable(kBundle);
+      bundle && *bundle == linkTarget) {
+    bundle_library_path = bundle->parent_path().string();
+  }
+  if (const auto bad = forbidden_environment(*environment, bundle_library_path)) {
     return verdict(Result::failed,
                    "AWS CLI environment variable not allowed: " + *bad);
+  }
+
+  const auto plugin_config = verify_plugin_config(*environment);
+  if (plugin_config.result != Result::passed) {
+    return plugin_config;
   }
 
   const auto maps = ProcessInfo::readProc(pid, "maps", 16U << 20);
