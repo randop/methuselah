@@ -206,6 +206,20 @@ int run_ssh_flow() {
   return EXIT_SUCCESS;
 }
 
+// Every macro verifies its caller the same way. Returns true, after saying
+// why, when the caller must be refused.
+bool reject_unverified(const char *macro, const SecurityVerdict &verdict) {
+  if (verdict.passed()) {
+    return false;
+  }
+  std::cerr << "Error: " << macro << " macro security verification "
+            << (verdict.result == SecurityVerificationResult::failed
+                    ? "failure"
+                    : "faulted")
+            << ": " << verdict.reason << std::endl;
+  return true;
+}
+
 bool valid_profile_name(std::string_view name) {
   return !name.empty() && name.size() <= 64 &&
          std::all_of(name.begin(), name.end(), [](unsigned char c) {
@@ -351,11 +365,12 @@ int run_aws_flow(const std::string &profile, pid_t caller,
 
   // The prompt can stay open for a long time. Make sure the process that is
   // about to receive the secrets is still the verified AWS CLI.
-  std::string reason;
-  if (ProcessInfo::parent() != caller ||
-      security.verify_aws(&reason) != SecurityVerificationResult::passed) {
-    std::cerr << "Error: aws caller changed or failed re-verification"
-              << (reason.empty() ? "" : ": ") << reason << std::endl;
+  if (ProcessInfo::parent() != caller) {
+    std::cerr << "Error: aws caller changed while unlocking credentials"
+              << std::endl;
+    return EXIT_FAILURE;
+  }
+  if (reject_unverified("aws", security.verify_aws())) {
     return EXIT_FAILURE;
   }
 
@@ -396,22 +411,17 @@ int Application::run(int argc, char **argv) {
     return EXIT_SUCCESS;
   } else if (macro == Macro::Gpg) {
     SPDLOG_TRACE("gpg security verification...");
-    auto svr = security.verify_gpg();
+    const auto verdict = security.verify_gpg();
 
     SPDLOG_TRACE("gpg security verification result");
-    if (svr != SecurityVerificationResult::passed) {
-      std::cerr << "Error: gpg macro security verification failure or faulted"
-                << std::endl;
+    if (reject_unverified("gpg", verdict)) {
       return EXIT_FAILURE;
     }
 
     PinentryServer server("gpg credentials", kDefaultMessage);
     return server.run();
   } else if (macro == Macro::Git) {
-    auto svr = security.verify_git();
-    if (svr != SecurityVerificationResult::passed) {
-      std::cerr << "Error: git macro security verification failure or faulted"
-                << std::endl;
+    if (reject_unverified("git", security.verify_git())) {
       return EXIT_FAILURE;
     }
 
@@ -419,13 +429,7 @@ int Application::run(int argc, char **argv) {
     return run_git_flow(predicate);
   } else if (macro == Macro::Aws) {
     const pid_t caller = ProcessInfo::parent();
-    std::string reason;
-    const auto svr = security.verify_aws(&reason);
-    if (svr != SecurityVerificationResult::passed) {
-      std::cerr << "Error: aws macro security verification "
-                << (svr == SecurityVerificationResult::failed ? "failure"
-                                                              : "faulted")
-                << ": " << reason << std::endl;
+    if (reject_unverified("aws", security.verify_aws())) {
       return EXIT_FAILURE;
     }
 
@@ -434,10 +438,7 @@ int Application::run(int argc, char **argv) {
   } else if (macro == Macro::Dummy) {
     return run_dummy();
   } else if (macro == Macro::Ssh) {
-    auto svr = security.verify_ssh();
-    if (svr != SecurityVerificationResult::passed) {
-      std::cerr << "Error: ssh macro security verification failure or faulted"
-                << std::endl;
+    if (reject_unverified("ssh", security.verify_ssh())) {
       return EXIT_FAILURE;
     }
 

@@ -18,6 +18,7 @@
 #include <fstream>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include <fcntl.h>
@@ -128,9 +129,10 @@ void test_credentials() {
   CHECK(!parse_ok(creds_text("expiration=2030-01-01 00:00:00\n")));
   CHECK(parse_ok(creds_text("expiration=2030-01-01T00:00:00Z\n")));
   CHECK(parse_ok(creds_text("expiration=2032-02-29T00:00:00Z\n")));
-  for (const char *invalid : {"2030-02-29T00:00:00Z", "2030-04-31T00:00:00Z",
-                              "2030-01-01T00:00:60Z", "2030-1-01T00:00:000Z",
-                              "2030-01-01T00:00:00ZZ", "2030- 1-01T00:00:00Z"}) {
+  for (const char *invalid :
+       {"2030-02-29T00:00:00Z", "2030-04-31T00:00:00Z", "2030-01-01T00:00:60Z",
+        "2030-1-01T00:00:000Z", "2030-01-01T00:00:00ZZ",
+        "2030- 1-01T00:00:00Z"}) {
     CHECK(!parse_ok(creds_text(std::string("expiration=") + invalid + "\n")));
   }
   std::string nul_expiry = "expiration=2030-01-01T00:00:00Z";
@@ -361,6 +363,41 @@ bool wait_for_exec(pid_t pid, const std::string &program) {
   return false;
 }
 
+// Every verify_*() call returns the same SecurityVerdict shape.
+void test_verdict() {
+  // Only string literals can become a reason, so it can never dangle.
+  static_assert(
+      std::is_constructible_v<SecurityVerdict, Result, const char (&)[3]>);
+  static_assert(!std::is_constructible_v<SecurityVerdict, Result, std::string>);
+  static_assert(
+      !std::is_constructible_v<SecurityVerdict, Result, const char *>);
+  static_assert(
+      !std::is_constructible_v<SecurityVerdict, Result, std::string_view>);
+
+  constexpr SecurityVerdict none;
+  static_assert(none.result == Result::faulted && none.reason.empty());
+  CHECK(!none.passed());
+
+  constexpr SecurityVerdict yes{Result::passed, "ok"};
+  const auto [result, reason] = yes; // structured binding
+  CHECK(result == Result::passed);
+  CHECK(reason == "ok");
+  CHECK(yes.passed());
+  constexpr SecurityVerdict no{Result::failed, "no"};
+  CHECK(!no.passed());
+
+  // The test runner is none of git, gpg, ssh or aws: each verifier must refuse
+  // it and say why.
+  const Security security;
+  const SecurityVerdict verdicts[] = {
+      security.verify_git(), security.verify_gpg(), security.verify_ssh(),
+      security.verify_aws()};
+  for (const auto &verdict : verdicts) {
+    CHECK(!verdict.passed());
+    CHECK(!verdict.reason.empty());
+  }
+}
+
 void test_verify() {
   // Stand a system shell in for `aws`: same checks, real kernel state.
   const auto shell = Security::trusted_executable("/bin/sh");
@@ -373,18 +410,18 @@ void test_verify() {
   options.required_name = shell->filename().string();
   const AwsCliVerifier verifier(options);
   const std::vector<std::string> sh_args = {"sh", "-c", "sleep 10; true"};
-  const std::vector<std::string> clean_env = {"HOME=/",
-                                              "AWS_PROFILE=p"};
+  const std::vector<std::string> clean_env = {"HOME=/", "AWS_PROFILE=p"};
 
   {
     Child ok = spawn(shell->string(), sh_args, clean_env);
     CHECK(wait_for_exec(ok.pid, shell->string()));
-    const auto verdict = verifier.verify(ok.pid);
-    if (verdict.result != Result::passed) {
-      std::fprintf(stderr, "  unexpected verdict: %s\n",
-                   verdict.reason.c_str());
+    const auto [result, reason] = verifier.verify(ok.pid);
+    if (result != Result::passed) {
+      std::fprintf(stderr, "  unexpected verdict: %.*s\n",
+                   static_cast<int>(reason.size()), reason.data());
     }
-    CHECK(verdict.result == Result::passed);
+    CHECK(result == Result::passed);
+    CHECK(reason == "ok");
 
     // A non-directory component yields ENOTDIR, not an absent pin.
     auto bad_pin = options;
@@ -407,7 +444,7 @@ void test_verify() {
     CHECK(wait_for_exec(bad.pid, shell->string()));
     const auto verdict = verifier.verify(bad.pid);
     CHECK(verdict.result == Result::failed);
-    CHECK(verdict.reason.find("LD_PRELOAD") != std::string::npos);
+    CHECK(verdict.reason == "AWS CLI environment variable not allowed");
   }
   {
     auto args = sh_args;
@@ -416,7 +453,7 @@ void test_verify() {
     CHECK(wait_for_exec(bad.pid, shell->string()));
     const auto verdict = verifier.verify(bad.pid);
     CHECK(verdict.result == Result::failed);
-    CHECK(verdict.reason.find("--endpoint-url") != std::string::npos);
+    CHECK(verdict.reason == "AWS CLI argument not allowed");
   }
   {
     // This test binary is not the configured CLI.
@@ -468,6 +505,7 @@ int main() {
   test_maps();
   test_trusted_file();
   test_pin_file_and_hash();
+  test_verdict();
   test_verify();
 
   std::printf("%d checks, %d failures\n", g_checks, g_failures);

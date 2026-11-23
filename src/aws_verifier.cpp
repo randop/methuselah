@@ -1,6 +1,10 @@
+#include "config.h"
+
 #include "methuselah/aws_verifier.hpp"
 
 #include "methuselah/process_info.hpp"
+
+#include <spdlog/spdlog.h>
 
 #include <sodium.h>
 
@@ -24,8 +28,11 @@ namespace {
 using Result = SecurityVerificationResult;
 constexpr const char *kBundle = "/usr/local/aws-cli/v2/current/dist/aws";
 
-AwsVerdict verdict(Result result, std::string reason) {
-  return AwsVerdict{result, std::move(reason)};
+// Only string literals are accepted (see SecurityVerdict), so the returned
+// reason can never dangle.
+template <std::size_t N>
+SecurityVerdict verdict(Result result, const char (&reason)[N]) {
+  return SecurityVerdict{result, reason};
 }
 
 bool starts_with(std::string_view value, std::string_view prefix) {
@@ -98,7 +105,7 @@ bool same_proc_object(pid_t pid, const char *leaf) {
          same_file(caller, self);
 }
 
-AwsVerdict verify_plugin_config(std::string_view environment) {
+SecurityVerdict verify_plugin_config(std::string_view environment) {
   std::optional<std::string_view> home;
   while (!environment.empty()) {
     const auto entry = next_entry(environment);
@@ -355,7 +362,7 @@ std::optional<std::string> AwsCliVerifier::sha256_hex(int fd) {
   return std::string(hex);
 }
 
-AwsVerdict AwsCliVerifier::verify(pid_t pid) const {
+SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
   if (pid <= 1) {
     return verdict(Result::faulted, "no AWS CLI parent process");
   }
@@ -458,7 +465,8 @@ AwsVerdict AwsCliVerifier::verify(pid_t pid) const {
     return verdict(Result::faulted, "cannot read caller arguments");
   }
   if (const auto bad = forbidden_arguments(*args)) {
-    return verdict(Result::failed, "AWS CLI argument not allowed: " + *bad);
+    SPDLOG_TRACE("aws caller argument not allowed: {}", *bad);
+    return verdict(Result::failed, "AWS CLI argument not allowed");
   }
 
   const auto environment = ProcessInfo::readProc(pid, "environ", 4U << 20);
@@ -477,8 +485,8 @@ AwsVerdict AwsCliVerifier::verify(pid_t pid) const {
   }
   if (const auto bad =
           forbidden_environment(*environment, bundle_library_path)) {
-    return verdict(Result::failed,
-                   "AWS CLI environment variable not allowed: " + *bad);
+    SPDLOG_TRACE("aws caller environment variable not allowed: {}", *bad);
+    return verdict(Result::failed, "AWS CLI environment variable not allowed");
   }
 
   const auto plugin_config = verify_plugin_config(*environment);
@@ -495,8 +503,8 @@ AwsVerdict AwsCliVerifier::verify(pid_t pid) const {
       continue;
     }
     if (!Security::trusted_file(path)) {
-      return verdict(Result::failed,
-                     "AWS CLI has untrusted code mapped: " + path);
+      SPDLOG_TRACE("aws caller has untrusted code mapped: {}", path);
+      return verdict(Result::failed, "AWS CLI has untrusted code mapped");
     }
   }
 

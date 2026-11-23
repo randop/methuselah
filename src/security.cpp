@@ -20,6 +20,8 @@ namespace methuselah {
 
 namespace {
 
+using Result = SecurityVerificationResult;
+
 void report(const ProcessInfo::Entry &e, const char *label) {
   std::cerr << label << ": pid " << e.pid << " (ppid " << e.ppid << ")\n"
             << "  exe:     " << e.exe << "\n"
@@ -116,23 +118,24 @@ Security::trusted_directory(const std::filesystem::path &candidate) {
   return trusted_path(candidate, PathKind::directory);
 }
 
-SecurityVerificationResult Security::verify_git() const {
+SecurityVerdict Security::verify_git() const {
   const auto gitHttp = GitHelper::locateRemoteHttp();
   if (!gitHttp) {
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted,
+            "git-remote-http was not found in a trusted git installation"};
   }
 
   const auto caller = ProcessInfo::caller();
   if (!caller) {
     std::cerr << "caller: unavailable\n";
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted, "caller process is unavailable"};
   }
 
   SPDLOG_TRACE("caller: {}", caller->exe);
   SPDLOG_TRACE("githttp: {}", gitHttp->string());
 
   if (caller->exe == "<unavailable>") {
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted, "caller executable is unavailable"};
   }
 
   // Resolve both sides so symlinked install locations compare equal.
@@ -141,28 +144,30 @@ SecurityVerificationResult Security::verify_git() const {
       std::filesystem::weakly_canonical(caller->exe, ec).string();
   if (ec) {
     report(*caller, "caller");
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted, "cannot resolve caller executable"};
   }
 
   const std::string helperExe =
       std::filesystem::weakly_canonical(*gitHttp, ec).string();
   if (ec) {
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted, "cannot resolve git-remote-http"};
   }
 
   const bool same = std::filesystem::equivalent(callerExe, helperExe, ec);
   if (ec) {
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted, "cannot compare caller with git-remote-http"};
   }
-  return same ? SecurityVerificationResult::passed
-              : SecurityVerificationResult::failed;
+  if (same) {
+    return {Result::passed, "ok"};
+  }
+  return {Result::failed, "caller is not git-remote-http"};
 }
 
-SecurityVerificationResult Security::verify_gpg() const {
+SecurityVerdict Security::verify_gpg() const {
   const auto caller = ProcessInfo::caller();
   if (!caller) {
     SPDLOG_TRACE("faulted: gpg no caller");
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted, "caller process is unavailable"};
   }
   SPDLOG_TRACE("gpg caller cmdline: {}", caller->cmdline);
 
@@ -178,7 +183,7 @@ SecurityVerificationResult Security::verify_gpg() const {
     callerPath = std::filesystem::weakly_canonical(caller->exe, ec);
     if (ec) {
       report(*caller, "caller");
-      return SecurityVerificationResult::faulted;
+      return {Result::faulted, "cannot resolve caller executable"};
     }
   } else {
     // gpg-agent marks itself non-dumpable, so /proc/<pid>/exe is hidden even
@@ -188,7 +193,7 @@ SecurityVerificationResult Security::verify_gpg() const {
     const std::string argv0 = caller->cmdline.substr(0, end);
     if (argv0.empty()) {
       SPDLOG_TRACE("faulted: gpg caller cmdline empty");
-      return SecurityVerificationResult::faulted;
+      return {Result::faulted, "caller command line is empty"};
     }
     argv0Path = argv0;
     SPDLOG_TRACE("caller (exe unavailable): {}", caller->cmdline);
@@ -199,7 +204,7 @@ SecurityVerificationResult Security::verify_gpg() const {
       const bool same = std::filesystem::equivalent(argv0Path, *binary, ec);
       if (!ec && same) {
         SPDLOG_TRACE("gpg caller argv0 passed match");
-        return SecurityVerificationResult::passed;
+        return {Result::passed, "ok"};
       }
     }
     SPDLOG_TRACE("gpg caller argv0 failure match");
@@ -222,10 +227,10 @@ SecurityVerificationResult Security::verify_gpg() const {
     if (hasExe) {
       const bool same = std::filesystem::equivalent(callerPath, *binary, ec);
       if (ec) {
-        return SecurityVerificationResult::faulted;
+        return {Result::faulted, "cannot compare caller with a GPG executable"};
       }
       if (same) {
-        return SecurityVerificationResult::passed;
+        return {Result::passed, "ok"};
       }
       continue;
     }
@@ -233,31 +238,33 @@ SecurityVerificationResult Security::verify_gpg() const {
     if (argv0Path.is_absolute()) {
       const auto trustedArg = Security::trusted_executable(argv0Path);
       if (!trustedArg) {
-        return SecurityVerificationResult::failed;
+        return {Result::failed, "caller is not a trusted GPG executable"};
       }
       const bool same = std::filesystem::equivalent(*trustedArg, *binary, ec);
       if (ec) {
-        return SecurityVerificationResult::faulted;
+        return {Result::faulted, "cannot compare caller with a GPG executable"};
       }
       if (same) {
-        return SecurityVerificationResult::passed;
+        return {Result::passed, "ok"};
       }
     }
   }
 
-  return foundTrusted ? SecurityVerificationResult::failed
-                      : SecurityVerificationResult::faulted;
+  if (foundTrusted) {
+    return {Result::failed, "caller is not a GPG executable"};
+  }
+  return {Result::faulted, "no trusted GPG executable found"};
 }
 
-SecurityVerificationResult Security::verify_ssh() const {
+SecurityVerdict Security::verify_ssh() const {
   const auto sshBinary = SSHhelper::locateBinary();
   if (!sshBinary) {
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted, "ssh was not found in a trusted location"};
   }
 
   const auto caller = ProcessInfo::caller();
   if (!caller || caller->exe == "<unavailable>") {
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted, "caller process or executable is unavailable"};
   }
 
   SPDLOG_TRACE("caller: {}", caller->exe);
@@ -267,45 +274,42 @@ SecurityVerificationResult Security::verify_ssh() const {
   std::error_code ec;
   const auto callerPath = std::filesystem::weakly_canonical(caller->exe, ec);
   if (ec) {
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted, "cannot resolve caller executable"};
   }
 
   const auto sshPath = std::filesystem::weakly_canonical(*sshBinary, ec);
   if (ec) {
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted, "cannot resolve ssh"};
   }
 
   const bool same = std::filesystem::equivalent(callerPath, sshPath, ec);
   if (ec) {
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted, "cannot compare caller with ssh"};
   }
   if (same) {
-    return SecurityVerificationResult::passed;
+    return {Result::passed, "ok"};
   }
 
   const auto sshAdd = SSHhelper::locateBinary("ssh-add");
   if (!sshAdd) {
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted, "ssh-add was not found in a trusted location"};
   }
   const auto sshAddPath = std::filesystem::weakly_canonical(*sshAdd, ec);
   if (ec) {
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted, "cannot resolve ssh-add"};
   }
   const bool sameAdd = std::filesystem::equivalent(callerPath, sshAddPath, ec);
   if (ec) {
-    return SecurityVerificationResult::faulted;
+    return {Result::faulted, "cannot compare caller with ssh-add"};
   }
-  return sameAdd ? SecurityVerificationResult::passed
-                 : SecurityVerificationResult::failed;
+  if (sameAdd) {
+    return {Result::passed, "ok"};
+  }
+  return {Result::failed, "caller is not ssh or ssh-add"};
 }
 
-SecurityVerificationResult Security::verify_aws(std::string *reason) const {
-  const pid_t caller = ProcessInfo::parent();
-  const AwsVerdict verdict = AwsCliVerifier{}.verify(caller);
-  if (reason != nullptr) {
-    *reason = verdict.reason;
-  }
-  return verdict.result;
+SecurityVerdict Security::verify_aws() const {
+  return AwsCliVerifier{}.verify(ProcessInfo::parent());
 }
 
 } // namespace methuselah

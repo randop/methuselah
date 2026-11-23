@@ -12,11 +12,6 @@
 
 namespace methuselah {
 
-struct AwsVerdict {
-  SecurityVerificationResult result = SecurityVerificationResult::faulted;
-  std::string reason;
-};
-
 // Decides whether the process that invoked `credential_process` is a genuine,
 // untampered AWS CLI v2. Every check fails closed: anything that cannot be
 // inspected is reported as `faulted`, never as `passed`.
@@ -52,7 +47,7 @@ public:
   AwsCliVerifier() : options_(default_options()) {}
   explicit AwsCliVerifier(Options options) : options_(std::move(options)) {}
 
-  [[nodiscard]] AwsVerdict verify(pid_t pid) const;
+  [[nodiscard]] SecurityVerdict verify(pid_t pid) const;
 
   // Pure helpers, exposed for unit tests.
 
