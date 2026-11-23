@@ -15,7 +15,7 @@ namespace methuselah {
 
 // Decides whether the process that invoked `credential_process` is a genuine,
 // untampered AWS CLI v2. Every check fails closed: anything that cannot be
-// inspected is reported as `faulted`, never as `passed`.
+// inspected is reported with `std::errc::io_error`, never as success.
 //
 //  1. The running image (/proc/<pid>/exe, by inode, so a path swapped after
 //     exec cannot fool it) is an `aws` reached through a chain of components

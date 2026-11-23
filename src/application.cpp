@@ -29,6 +29,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -213,7 +214,7 @@ bool reject_unverified(const char *macro, const SecurityVerdict &verdict) {
     return false;
   }
   std::cerr << "Error: " << macro << " macro security verification "
-            << (verdict.result == SecurityVerificationResult::failed
+            << (verdict.result == std::errc::permission_denied
                     ? "failure"
                     : "faulted")
             << ": " << verdict.reason << std::endl;

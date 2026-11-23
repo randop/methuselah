@@ -28,7 +28,6 @@
 namespace methuselah {
 namespace {
 
-using Result = SecurityVerificationResult;
 constexpr const char *kRootBundle = "/usr/local/aws-cli/v2/current/dist/aws";
 constexpr const char *kServiceBundle =
     "/opt/methuselah/aws-cli/v2/current/dist/aws";
@@ -37,7 +36,7 @@ constexpr const char *kServiceAccount = "methuselah";
 // Only string literals are accepted (see SecurityVerdict), so the returned
 // reason can never dangle.
 template <std::size_t N>
-SecurityVerdict verdict(Result result, const char (&reason)[N]) {
+SecurityVerdict verdict(std::errc result, const char (&reason)[N]) {
   return SecurityVerdict{result, reason};
 }
 
@@ -153,13 +152,13 @@ SecurityVerdict verify_plugin_config(std::string_view environment) {
     const auto entry = next_entry(environment);
     if (entry == "HOME" || starts_with(entry, "HOME=")) {
       if (home || entry == "HOME") {
-        return verdict(Result::faulted, "cannot determine AWS CLI home");
+        return verdict(std::errc::io_error, "cannot determine AWS CLI home");
       }
       home = entry.substr(5);
     }
   }
   if (!home || home->empty()) {
-    return verdict(Result::faulted, "cannot determine AWS CLI home");
+    return verdict(std::errc::io_error, "cannot determine AWS CLI home");
   }
 
   // The CLI caches full_config before invoking credential_process. Inspecting
@@ -167,30 +166,33 @@ SecurityVerdict verify_plugin_config(std::string_view environment) {
   const auto trusted_home =
       Security::trusted_directory(std::filesystem::path(*home));
   if (!trusted_home) {
-    return verdict(Result::failed, "AWS CLI home must be root controlled");
+    return verdict(std::errc::permission_denied,
+                   "AWS CLI home must be root controlled");
   }
   const auto config_dir = *trusted_home / ".aws";
   struct stat info{};
   if (::lstat(config_dir.c_str(), &info) != 0) {
     if (errno == ENOENT) {
-      return verdict(Result::passed, "ok");
+      return verdict(std::errc{}, "ok");
     }
-    return verdict(Result::faulted, "cannot inspect AWS CLI config directory");
+    return verdict(std::errc::io_error,
+                   "cannot inspect AWS CLI config directory");
   }
   const auto trusted_dir = Security::trusted_directory(config_dir);
   if (!trusted_dir) {
-    return verdict(Result::faulted,
+    return verdict(std::errc::io_error,
                    "cannot establish trust in AWS CLI config directory");
   }
   const auto config = *trusted_dir / "config";
   if (::lstat(config.c_str(), &info) != 0) {
     return errno == ENOENT
-               ? verdict(Result::passed, "ok")
-               : verdict(Result::faulted, "cannot inspect AWS CLI config file");
+               ? verdict(std::errc{}, "ok")
+               : verdict(std::errc::io_error,
+                         "cannot inspect AWS CLI config file");
   }
   const auto trusted_config = Security::trusted_file(config);
   if (!trusted_config) {
-    return verdict(Result::faulted,
+    return verdict(std::errc::io_error,
                    "cannot establish trust in AWS CLI config file");
   }
 
@@ -226,15 +228,15 @@ SecurityVerdict AwsCliVerifier::scan_plugin_config(std::istream &stream) {
       // the last closing bracket. It accepts trailing text after that bracket.
       constexpr std::string_view header = "[plugins]";
       if (starts_with(text, header) && text.rfind(']') == header.size() - 1) {
-        return verdict(Result::failed,
+        return verdict(std::errc::permission_denied,
                        "AWS CLI plugin configuration is not allowed");
       }
     }
   }
   if (stream.bad() || !stream.eof()) {
-    return verdict(Result::faulted, "cannot read AWS CLI config file");
+    return verdict(std::errc::io_error, "cannot read AWS CLI config file");
   }
-  return verdict(Result::passed, "ok");
+  return verdict(std::errc{}, "ok");
 }
 
 AwsCliVerifier::Options AwsCliVerifier::default_options() {
@@ -423,35 +425,36 @@ std::optional<std::string> AwsCliVerifier::sha256_hex(int fd) {
 
 SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
   if (pid <= 1) {
-    return verdict(Result::faulted, "no AWS CLI parent process");
+    return verdict(std::errc::io_error, "no AWS CLI parent process");
   }
 
   // Tracer: a same-uid debugger could rewrite the CLI after it passes.
   const auto status = ProcessInfo::readProc(pid, "status");
   if (!status) {
-    return verdict(Result::faulted, "cannot read caller status");
+    return verdict(std::errc::io_error, "cannot read caller status");
   }
   const auto tracer = status->find("TracerPid:");
   if (tracer == std::string::npos) {
-    return verdict(Result::faulted, "caller status lacks TracerPid");
+    return verdict(std::errc::io_error, "caller status lacks TracerPid");
   }
   if (std::atol(status->c_str() + tracer + 10) != 0) {
-    return verdict(Result::failed, "caller is being traced");
+    return verdict(std::errc::permission_denied, "caller is being traced");
   }
 
   // Identity of the running image, by inode.
   const std::string exeLink = proc_link(pid, "exe");
   struct stat running{};
   if (::stat(exeLink.c_str(), &running) != 0) {
-    return verdict(Result::faulted, "cannot inspect caller executable");
+    return verdict(std::errc::io_error, "cannot inspect caller executable");
   }
   std::error_code ec;
   const auto linkTarget = std::filesystem::read_symlink(exeLink, ec);
   if (ec) {
-    return verdict(Result::faulted, "cannot read caller executable link");
+    return verdict(std::errc::io_error, "cannot read caller executable link");
   }
   if (linkTarget.string().ends_with(" (deleted)")) {
-    return verdict(Result::failed, "caller executable was replaced on disk");
+    return verdict(std::errc::permission_denied,
+                   "caller executable was replaced on disk");
   }
 
   const TrustPolicy install_trust{options_.install_owners};
@@ -480,10 +483,12 @@ SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
     }
   }
   if (!anyTrusted) {
-    return verdict(Result::faulted, "no trusted AWS CLI v2 installation found");
+    return verdict(std::errc::io_error,
+                   "no trusted AWS CLI v2 installation found");
   }
   if (!matched) {
-    return verdict(Result::failed, "caller is not a trusted AWS CLI v2");
+    return verdict(std::errc::permission_denied,
+                   "caller is not a trusted AWS CLI v2");
   }
 
   // Optional digest pin of the running image.
@@ -491,11 +496,12 @@ SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
   if (::lstat(options_.pin_file.c_str(), &pinInfo) == 0) {
     const auto pinPath = Security::trusted_file(options_.pin_file);
     if (!pinPath) {
-      return verdict(Result::faulted, "AWS CLI pin file is not root-owned");
+      return verdict(std::errc::io_error,
+                     "AWS CLI pin file is not root-owned");
     }
     const int pinFd = ::open(pinPath->c_str(), O_RDONLY | O_CLOEXEC);
     if (pinFd < 0) {
-      return verdict(Result::faulted, "cannot open AWS CLI pin file");
+      return verdict(std::errc::io_error, "cannot open AWS CLI pin file");
     }
     std::string text;
     char buffer[1024];
@@ -507,57 +513,61 @@ SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
     ::close(pinFd);
     const auto pins = parse_pin_file(text);
     if (!pins) {
-      return verdict(Result::faulted, "AWS CLI pin file is empty or invalid");
+      return verdict(std::errc::io_error,
+                     "AWS CLI pin file is empty or invalid");
     }
 
     const int exeFd = ::open(exeLink.c_str(), O_RDONLY | O_CLOEXEC);
     if (exeFd < 0) {
-      return verdict(Result::faulted, "cannot open caller executable");
+      return verdict(std::errc::io_error, "cannot open caller executable");
     }
     const auto digest = sha256_hex(exeFd);
     ::close(exeFd);
     if (!digest) {
-      return verdict(Result::faulted, "cannot hash caller executable");
+      return verdict(std::errc::io_error, "cannot hash caller executable");
     }
     if (std::find(pins->begin(), pins->end(), *digest) == pins->end()) {
-      return verdict(Result::failed,
+      return verdict(std::errc::permission_denied,
                      "AWS CLI does not match its pinned SHA-256 (modified or "
                      "upgraded without refreshing the pin)");
     }
   } else if (errno != ENOENT) {
-    return verdict(Result::faulted, "cannot inspect AWS CLI pin file");
+    return verdict(std::errc::io_error, "cannot inspect AWS CLI pin file");
   }
 
   const auto args = ProcessInfo::argv(pid);
   if (!args) {
-    return verdict(Result::faulted, "cannot read caller arguments");
+    return verdict(std::errc::io_error, "cannot read caller arguments");
   }
   if (const auto bad = forbidden_arguments(*args)) {
     SPDLOG_TRACE("aws caller argument not allowed: {}", *bad);
-    return verdict(Result::failed, "AWS CLI argument not allowed");
+    return verdict(std::errc::permission_denied,
+                   "AWS CLI argument not allowed");
   }
 
   const auto environment = ProcessInfo::readProc(pid, "environ", 4U << 20);
   if (!environment) {
-    return verdict(Result::faulted, "cannot read caller environment");
+    return verdict(std::errc::io_error, "cannot read caller environment");
   }
   if (!same_proc_object(pid, "root") || !same_proc_object(pid, "ns/mnt")) {
-    return verdict(Result::faulted, "cannot verify caller filesystem context");
+    return verdict(std::errc::io_error,
+                   "cannot verify caller filesystem context");
   }
   if (const auto bad =
           forbidden_environment(*environment, bundle_library_path)) {
     SPDLOG_TRACE("aws caller environment variable not allowed: {}", *bad);
-    return verdict(Result::failed, "AWS CLI environment variable not allowed");
+    return verdict(std::errc::permission_denied,
+                   "AWS CLI environment variable not allowed");
   }
 
   const auto plugin_config = verify_plugin_config(*environment);
-  if (plugin_config.result != Result::passed) {
+  if (plugin_config.result != std::errc{}) {
     return plugin_config;
   }
 
   const auto maps = ProcessInfo::readProc(pid, "maps", 16U << 20);
   if (!maps) {
-    return verdict(Result::faulted, "cannot read caller memory map");
+    return verdict(std::errc::io_error, "cannot read caller memory map");
   }
   for (const auto &path : executable_mapping_paths(*maps)) {
     if (allowed_special_mapping(path)) {
@@ -565,16 +575,17 @@ SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
     }
     if (!Security::trusted_file(path, install_trust)) {
       SPDLOG_TRACE("aws caller has untrusted code mapped: {}", path);
-      return verdict(Result::failed, "AWS CLI has untrusted code mapped");
+      return verdict(std::errc::permission_denied,
+                     "AWS CLI has untrusted code mapped");
     }
   }
 
   // The caller must still be the same process we started inspecting.
   struct stat after{};
   if (::stat(exeLink.c_str(), &after) != 0 || !same_file(running, after)) {
-    return verdict(Result::faulted, "caller changed during verification");
+    return verdict(std::errc::io_error, "caller changed during verification");
   }
-  return verdict(Result::passed, "ok");
+  return verdict(std::errc{}, "ok");
 }
 
 } // namespace methuselah

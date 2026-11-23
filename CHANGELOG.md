@@ -43,11 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writable by group or others.
 - The unknown-macro check now runs before the instance lock is taken.
 - `Security::verify_git()`, `verify_gpg()`, `verify_ssh()`, and `verify_aws()`
-  now all return a `SecurityVerdict` (`result` plus a `reason`) instead of a
-  bare `SecurityVerificationResult`, so a refused caller is always explained
-  and can be unpacked with `const auto [result, reason] = ...`. `reason` is a
-  `std::string_view` that only accepts string literals, so it cannot dangle;
-  variable detail (an argument, variable, or path) moved to trace logging.
+  return a `SecurityVerdict` (`std::errc` result plus a reason). Success uses
+  `std::errc{}`, policy refusals use `std::errc::permission_denied`, and
+  verification faults use `std::errc::io_error`. The verdict can be unpacked
+  with `const auto [result, reason] = ...`. `reason` is a `std::string_view`
+  that only accepts string literals, so it cannot dangle; variable detail
+  (an argument, variable, or path) moved to trace logging.
   `AwsVerdict` and the `verify_aws(std::string *)` out-parameter are gone.
 
 ### Security

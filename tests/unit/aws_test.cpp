@@ -19,6 +19,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -30,7 +31,6 @@
 #include <unistd.h>
 
 using namespace methuselah;
-using Result = SecurityVerificationResult;
 
 namespace {
 
@@ -209,12 +209,13 @@ void test_plugin_config() {
        {"[plugins]", " \t[plugins] \r\n", "[plugins] # comment\n",
         "[profile prod]\r[plugins]\r", "\u00a0[plugins]\n"}) {
     std::istringstream blocked(config);
-    CHECK(V::scan_plugin_config(blocked).result == Result::failed);
+    CHECK(V::scan_plugin_config(blocked).result ==
+          std::errc::permission_denied);
   }
 
   std::istringstream unreadable;
   unreadable.setstate(std::ios::badbit);
-  CHECK(V::scan_plugin_config(unreadable).result == Result::faulted);
+  CHECK(V::scan_plugin_config(unreadable).result == std::errc::io_error);
 }
 
 void test_arguments() {
@@ -491,11 +492,11 @@ void test_service_install() {
                         {"HOME=/", "AWS_PROFILE=p"});
     CHECK(wait_for_exec(child.pid, copy.string()));
     const auto [result, reason] = verifier.verify(child.pid);
-    if (result != Result::passed) {
+    if (result != std::errc{}) {
       std::fprintf(stderr, "  unexpected verdict: %.*s\n",
                    static_cast<int>(reason.size()), reason.data());
     }
-    CHECK(result == Result::passed);
+    CHECK(result == std::errc{});
   }
   fs::remove_all(base, ec);
 }
@@ -504,23 +505,24 @@ void test_service_install() {
 void test_verdict() {
   // Only string literals can become a reason, so it can never dangle.
   static_assert(
-      std::is_constructible_v<SecurityVerdict, Result, const char (&)[3]>);
-  static_assert(!std::is_constructible_v<SecurityVerdict, Result, std::string>);
+      std::is_constructible_v<SecurityVerdict, std::errc, const char (&)[3]>);
   static_assert(
-      !std::is_constructible_v<SecurityVerdict, Result, const char *>);
+      !std::is_constructible_v<SecurityVerdict, std::errc, std::string>);
   static_assert(
-      !std::is_constructible_v<SecurityVerdict, Result, std::string_view>);
+      !std::is_constructible_v<SecurityVerdict, std::errc, const char *>);
+  static_assert(
+      !std::is_constructible_v<SecurityVerdict, std::errc, std::string_view>);
 
   constexpr SecurityVerdict none;
-  static_assert(none.result == Result::faulted && none.reason.empty());
+  static_assert(none.result == std::errc::io_error && none.reason.empty());
   CHECK(!none.passed());
 
-  constexpr SecurityVerdict yes{Result::passed, "ok"};
+  constexpr SecurityVerdict yes{std::errc{}, "ok"};
   const auto [result, reason] = yes; // structured binding
-  CHECK(result == Result::passed);
+  CHECK(result == std::errc{});
   CHECK(reason == "ok");
   CHECK(yes.passed());
-  constexpr SecurityVerdict no{Result::failed, "no"};
+  constexpr SecurityVerdict no{std::errc::permission_denied, "no"};
   CHECK(!no.passed());
 
   // The test runner is none of git, gpg, ssh or aws: each verifier must refuse
@@ -530,7 +532,7 @@ void test_verdict() {
       security.verify_git(), security.verify_gpg(), security.verify_ssh(),
       security.verify_aws(::getpid())};
   const auto invalid_aws_caller = security.verify_aws(0);
-  CHECK(invalid_aws_caller.result == Result::faulted);
+  CHECK(invalid_aws_caller.result == std::errc::io_error);
   CHECK(invalid_aws_caller.reason == "no AWS CLI parent process");
   for (const auto &verdict : verdicts) {
     CHECK(!verdict.passed());
@@ -556,25 +558,25 @@ void test_verify() {
     Child ok = spawn(shell->string(), sh_args, clean_env);
     CHECK(wait_for_exec(ok.pid, shell->string()));
     const auto [result, reason] = verifier.verify(ok.pid);
-    if (result != Result::passed) {
+    if (result != std::errc{}) {
       std::fprintf(stderr, "  unexpected verdict: %.*s\n",
                    static_cast<int>(reason.size()), reason.data());
     }
-    CHECK(result == Result::passed);
+    CHECK(result == std::errc{});
     CHECK(reason == "ok");
 
     // A non-directory component yields ENOTDIR, not an absent pin.
     auto bad_pin = options;
     bad_pin.pin_file = "/dev/null/aws-cli.sha256";
     const auto pin_verdict = AwsCliVerifier(bad_pin).verify(ok.pid);
-    CHECK(pin_verdict.result == Result::faulted);
+    CHECK(pin_verdict.result == std::errc::io_error);
     CHECK(pin_verdict.reason == "cannot inspect AWS CLI pin file");
   }
   {
     Child bad = spawn(shell->string(), sh_args, {"HOME=/tmp"});
     CHECK(wait_for_exec(bad.pid, shell->string()));
     const auto verdict = verifier.verify(bad.pid);
-    CHECK(verdict.result == Result::failed);
+    CHECK(verdict.result == std::errc::permission_denied);
     CHECK(verdict.reason.find("root controlled") != std::string::npos);
   }
   {
@@ -583,7 +585,7 @@ void test_verify() {
     Child bad = spawn(shell->string(), sh_args, env);
     CHECK(wait_for_exec(bad.pid, shell->string()));
     const auto verdict = verifier.verify(bad.pid);
-    CHECK(verdict.result == Result::failed);
+    CHECK(verdict.result == std::errc::permission_denied);
     CHECK(verdict.reason == "AWS CLI environment variable not allowed");
   }
   {
@@ -592,12 +594,12 @@ void test_verify() {
     Child bad = spawn(shell->string(), args, clean_env);
     CHECK(wait_for_exec(bad.pid, shell->string()));
     const auto verdict = verifier.verify(bad.pid);
-    CHECK(verdict.result == Result::failed);
+    CHECK(verdict.result == std::errc::permission_denied);
     CHECK(verdict.reason == "AWS CLI argument not allowed");
   }
   {
     // This test binary is not the configured CLI.
-    CHECK(verifier.verify(::getpid()).result == Result::failed);
+    CHECK(verifier.verify(::getpid()).result == std::errc::permission_denied);
   }
   {
     // A byte-identical copy in a user-writable directory is still not the
@@ -610,12 +612,12 @@ void test_verify() {
 
     Child fake = spawn(copy, sh_args, clean_env);
     CHECK(wait_for_exec(fake.pid, copy));
-    CHECK(verifier.verify(fake.pid).result == Result::failed);
+    CHECK(verifier.verify(fake.pid).result == std::errc::permission_denied);
 
     // Replaced on disk after start.
     ::unlink(copy.c_str());
     const auto deleted = verifier.verify(fake.pid);
-    CHECK(deleted.result == Result::failed);
+    CHECK(deleted.result == std::errc::permission_denied);
     ::rmdir(dir);
   }
   {
@@ -624,11 +626,11 @@ void test_verify() {
     none.candidates = {"/nonexistent/aws"};
     Child ok = spawn(shell->string(), sh_args, clean_env);
     CHECK(wait_for_exec(ok.pid, shell->string()));
-    CHECK(AwsCliVerifier(none).verify(ok.pid).result == Result::faulted);
+    CHECK(AwsCliVerifier(none).verify(ok.pid).result == std::errc::io_error);
   }
   {
-    CHECK(verifier.verify(0).result == Result::faulted);
-    CHECK(verifier.verify(1).result == Result::faulted);
+    CHECK(verifier.verify(0).result == std::errc::io_error);
+    CHECK(verifier.verify(1).result == std::errc::io_error);
   }
 }
 

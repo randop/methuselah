@@ -3,19 +3,13 @@
 #include <sys/types.h>
 
 #include <cstddef>
-#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 namespace methuselah {
-
-enum class SecurityVerificationResult : std::uint8_t {
-  passed,
-  failed,
-  faulted
-};
 
 // Ownership accepted by Security::trusted_executable(), trusted_file(), and
 // trusted_directory(). Root is the default because system packages are
@@ -26,7 +20,10 @@ struct TrustPolicy {
   std::vector<uid_t> owners{0};
 };
 
-// Outcome of every Security::verify_*() call: a verdict plus a short reason.
+// Outcome of every Security::verify_*() call: a standard error condition
+// plus a short reason. `std::errc{}` means success, `permission_denied` means
+// the caller failed a security policy check, and `io_error` means verification
+// could not be completed.
 //
 // `reason` is a view and owns nothing, so it must outlive the verdict. The
 // constructor only accepts string literals (static storage), which makes a
@@ -36,18 +33,18 @@ struct TrustPolicy {
 //
 //   const auto [result, reason] = security.verify_git();
 struct SecurityVerdict {
-  SecurityVerificationResult result = SecurityVerificationResult::faulted;
+  std::errc result = std::errc::io_error;
   std::string_view reason{};
 
   constexpr SecurityVerdict() noexcept = default;
 
   template <std::size_t N>
-  constexpr SecurityVerdict(SecurityVerificationResult outcome,
+  constexpr SecurityVerdict(std::errc outcome,
                             const char (&literal)[N]) noexcept
       : result(outcome), reason(literal) {}
 
   [[nodiscard]] constexpr bool passed() const noexcept {
-    return result == SecurityVerificationResult::passed;
+    return result == std::errc{};
   }
 };
 
