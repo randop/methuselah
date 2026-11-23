@@ -163,7 +163,8 @@ void test_environment() {
         "AWS_ENDPOINT_URL=https://evil", "AWS_ENDPOINT_URL_S3=https://evil",
         "AWS_CA_BUNDLE=/tmp/ca.pem", "SSL_CERT_FILE=/tmp/ca.pem",
         "REQUESTS_CA_BUNDLE=/tmp/ca.pem", "AWS_CONFIG_FILE=/tmp/cfg",
-        "GCONV_PATH=/tmp"}) {
+        "GCONV_PATH=/tmp", "AWS_CLI_AUTO_PROMPT=on",
+        "AWS_CLI_AUTO_PROMPT=ON-PARTIAL"}) {
     const std::string env = clean + bad + '\0';
     const auto hit = V::forbidden_environment(env);
     CHECK(hit.has_value());
@@ -189,6 +190,8 @@ void test_environment() {
   CHECK(V::forbidden_environment(bundled + "AWS_DATA_PATH=/tmp/models" + '\0',
                                  bundle) == "AWS_DATA_PATH");
 
+  CHECK(!V::forbidden_environment(clean + "AWS_CLI_AUTO_PROMPT=off"));
+
   // Names must match; look-alikes and values must not.
   CHECK(!V::forbidden_environment(std::string("MY_LD_PRELOAD=1") + '\0')
              .has_value());
@@ -198,24 +201,37 @@ void test_environment() {
              .has_value());
 }
 
-void test_plugin_config() {
+void test_cli_config() {
   using V = AwsCliVerifier;
   std::istringstream clean(
       "\n \t# [plugins]\n ; [plugins]\n[profile prod]\n"
-      "description = mentions [plugins]\n[plugins] other]\n");
-  CHECK(V::scan_plugin_config(clean).passed());
+      "description = mentions [plugins]\nCLI_AUTO_PROMPT : OFF \n"
+      "[plugins] other]\n");
+  CHECK(V::scan_cli_config(clean, true).passed());
 
   for (const char *config :
        {"[plugins]", " \t[plugins] \r\n", "[plugins] # comment\n",
         "[profile prod]\r[plugins]\r", "\u00a0[plugins]\n"}) {
     std::istringstream blocked(config);
-    CHECK(V::scan_plugin_config(blocked).result ==
+    CHECK(V::scan_cli_config(blocked, true).result ==
           std::errc::permission_denied);
   }
 
+  for (const char *config : {"[default]\ncli_auto_prompt=on\n",
+                             "[DEFAULT]\rCLI_AUTO_PROMPT\u00a0: On-Partial\r",
+                             "[profile prod]\ncli_auto_prompt =\n  on\n"}) {
+    for (bool check_plugins : {true, false}) {
+      std::istringstream blocked(config);
+      CHECK(V::scan_cli_config(blocked, check_plugins).result ==
+            std::errc::permission_denied);
+    }
+  }
+  std::istringstream credentials("[plugins]\ncli_auto_prompt = off\n");
+  CHECK(V::scan_cli_config(credentials, false).passed());
+
   std::istringstream unreadable;
   unreadable.setstate(std::ios::badbit);
-  CHECK(V::scan_plugin_config(unreadable).result == std::errc::io_error);
+  CHECK(V::scan_cli_config(unreadable, true).result == std::errc::io_error);
 }
 
 void test_arguments() {
@@ -230,7 +246,8 @@ void test_arguments() {
   for (const char *bad :
        {"--debug", "--no-verify-ssl", "--endpoint-url",
         "--endpoint-url=http://x", "--ca-bundle", "--ca-bundle=/tmp/ca",
-        "--endpoint", "--no-verify", "--deb", "export-credentials"}) {
+        "--endpoint", "--no-verify", "--deb", "export-credentials",
+        "--cli-auto-prompt", "--cli-auto-p"}) {
     const auto hit = V::forbidden_arguments({"aws", "configure", bad});
     CHECK(hit.has_value());
     if (hit) {
@@ -240,6 +257,17 @@ void test_arguments() {
   // Positional text after "--" is data.
   CHECK(!V::forbidden_arguments({"aws", "s3", "cp", "--", "--debug"})
              .has_value());
+  CHECK(!V::forbidden_arguments(
+      {"aws", "--", "s3", "cp", "--", "export-credentials"}));
+  CHECK(!V::forbidden_arguments({"aws", "s3", "ls", "--no-cli-auto-prompt"}));
+  CHECK(V::forbidden_arguments({"aws", "s3", "cp", "--",
+                                "--cli-auto-prompt"}) == "--cli-auto-prompt");
+  CHECK(V::forbidden_arguments({"aws", "--", "configure",
+                                "export-credentials"}) == "export-credentials");
+  CHECK(V::forbidden_arguments({"aws", "--profile", "prod", "--", "configure",
+                                "export-credentials"}) == "export-credentials");
+  CHECK(V::forbidden_arguments({"aws", "configure", "--",
+                                "export-credentials"}) == "export-credentials");
   // argv[0] is the program, not an option.
   CHECK(!V::forbidden_arguments({"--debug"}).has_value());
   // Longer options that merely share a prefix with a forbidden one.
@@ -643,7 +671,7 @@ int main() {
   }
   test_credentials();
   test_environment();
-  test_plugin_config();
+  test_cli_config();
   test_arguments();
   test_maps();
   test_trusted_file();

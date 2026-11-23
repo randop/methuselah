@@ -74,8 +74,31 @@ constexpr std::array<std::string_view, 20> kForbiddenEnvironment = {
     "SSLKEYLOGFILE"}; // writes TLS session secrets to disk
 
 // Long options that redirect, weaken, or dump credential handling.
-constexpr std::array<std::string_view, 4> kForbiddenOptions = {
-    "--endpoint-url", "--ca-bundle", "--no-verify-ssl", "--debug"};
+constexpr std::string_view kAutoPromptOption = "--cli-auto-prompt";
+constexpr std::string_view kAutoPromptEnv = "AWS_CLI_AUTO_PROMPT";
+constexpr std::string_view kAutoPromptConfig = "cli_auto_prompt";
+constexpr std::array<std::string_view, 5> kForbiddenOptions = {
+    "--endpoint-url", "--ca-bundle", "--no-verify-ssl", "--debug",
+    kAutoPromptOption};
+
+// Global options that consume a separate value when written without '='.
+// Keep in sync with the AWS CLI v2 global option table.
+constexpr std::string_view kGlobalValueOptions[] = {"--profile",
+                                                    "--region",
+                                                    "--output",
+                                                    "--query",
+                                                    "--color",
+                                                    "--cli-read-timeout",
+                                                    "--cli-connect-timeout",
+                                                    "--cli-binary-format",
+                                                    "--cli-error-format"};
+
+bool ascii_iequals(std::string_view value, std::string_view lowercase) {
+  return std::equal(value.begin(), value.end(), lowercase.begin(),
+                    lowercase.end(), [](char a, char b) {
+                      return (a >= 'A' && a <= 'Z' ? a + ('a' - 'A') : a) == b;
+                    });
+}
 
 bool name_matches(std::string_view name, std::string_view pattern) {
   if (!pattern.empty() && pattern.back() == '*') {
@@ -146,7 +169,7 @@ std::string_view strip_config_indent(std::string_view text) {
   return text;
 }
 
-SecurityVerdict verify_plugin_config(std::string_view environment) {
+SecurityVerdict verify_cli_config(std::string_view environment) {
   std::optional<std::string_view> home;
   while (!environment.empty()) {
     const auto entry = next_entry(environment);
@@ -183,23 +206,29 @@ SecurityVerdict verify_plugin_config(std::string_view environment) {
     return verdict(std::errc::io_error,
                    "cannot establish trust in AWS CLI config directory");
   }
-  const auto config = *trusted_dir / "config";
-  if (::lstat(config.c_str(), &info) != 0) {
-    return errno == ENOENT
-               ? verdict(std::errc{}, "ok")
-               : verdict(std::errc::io_error,
-                         "cannot inspect AWS CLI config file");
+  // Both files feed the scoped profile used to resolve auto-prompt. Only
+  // config can supply a top-level plugins section.
+  for (const auto *name : {"config", "credentials"}) {
+    const auto path = *trusted_dir / name;
+    if (::lstat(path.c_str(), &info) != 0) {
+      if (errno == ENOENT) {
+        continue;
+      }
+      return verdict(std::errc::io_error, "cannot inspect AWS CLI config file");
+    }
+    const auto trusted_path = Security::trusted_file(path);
+    if (!trusted_path) {
+      return verdict(std::errc::io_error,
+                     "cannot establish trust in AWS CLI config file");
+    }
+    std::ifstream stream(*trusted_path);
+    const auto result = AwsCliVerifier::scan_cli_config(
+        stream, std::string_view(name) == "config");
+    if (!result.passed()) {
+      return result;
+    }
   }
-  const auto trusted_config = Security::trusted_file(config);
-  if (!trusted_config) {
-    return verdict(std::errc::io_error,
-                   "cannot establish trust in AWS CLI config file");
-  }
-
-  // AWS CLI v2 looks up the exact top-level section "plugins" in full_config.
-  // The shared credentials file only merges entries under "profiles".
-  std::ifstream stream(*trusted_config);
-  return AwsCliVerifier::scan_plugin_config(stream);
+  return verdict(std::errc{}, "ok");
 }
 
 // libffi legitimately backs closure trampolines with a memfd.
@@ -215,7 +244,8 @@ bool allowed_special_mapping(std::string_view path) {
 
 } // namespace
 
-SecurityVerdict AwsCliVerifier::scan_plugin_config(std::istream &stream) {
+SecurityVerdict AwsCliVerifier::scan_cli_config(std::istream &stream,
+                                                bool check_plugins) {
   for (std::string line; std::getline(stream, line);) {
     // Python opens the config in universal newline mode.
     std::string_view remaining(line);
@@ -227,9 +257,28 @@ SecurityVerdict AwsCliVerifier::scan_plugin_config(std::istream &stream) {
       // RawConfigParser matches from the start of the trimmed line through
       // the last closing bracket. It accepts trailing text after that bracket.
       constexpr std::string_view header = "[plugins]";
-      if (starts_with(text, header) && text.rfind(']') == header.size() - 1) {
+      if (check_plugins && starts_with(text, header) &&
+          text.rfind(']') == header.size() - 1) {
         return verdict(std::errc::permission_denied,
                        "AWS CLI plugin configuration is not allowed");
+      }
+      // RawConfigParser lowercases option names and accepts both separators.
+      // Check every profile, including inherited settings in [DEFAULT].
+      if (text.size() >= kAutoPromptConfig.size() &&
+          ascii_iequals(text.substr(0, kAutoPromptConfig.size()),
+                        kAutoPromptConfig)) {
+        const auto assignment =
+            strip_config_indent(text.substr(kAutoPromptConfig.size()));
+        if (!assignment.empty() &&
+            (assignment.front() == '=' || assignment.front() == ':')) {
+          const auto value = strip_config_indent(assignment.substr(1));
+          // Allow an explicit off. A continued value cannot turn off into on.
+          if (!ascii_iequals(value.substr(0, 3), "off") ||
+              !strip_config_indent(value.substr(3)).empty()) {
+            return verdict(std::errc::permission_denied,
+                           "AWS CLI auto-prompt configuration is not allowed");
+          }
+        }
       }
     }
   }
@@ -263,6 +312,11 @@ AwsCliVerifier::forbidden_environment(std::string_view environment,
     const auto entry = next_entry(environment);
     const auto equals = entry.find('=');
     const auto name = entry.substr(0, equals);
+    if (name == kAutoPromptEnv &&
+        (equals == std::string_view::npos ||
+         !ascii_iequals(entry.substr(equals + 1), "off"))) {
+      return std::string(name);
+    }
     if (name == "LD_LIBRARY_PATH" && equals != std::string_view::npos &&
         !seen_library_path && !bundle_library_path.empty() &&
         bundle_library_path.find_first_of(":;$") == std::string_view::npos &&
@@ -283,27 +337,55 @@ AwsCliVerifier::forbidden_environment(std::string_view environment,
 
 std::optional<std::string>
 AwsCliVerifier::forbidden_arguments(const std::vector<std::string> &args) {
-  // argv[0] is the program name; options after a bare "--" are positional.
+  bool after_delimiter = false;
+  bool value_expected = false;
+  std::string_view command;
+  bool have_subcommand = false;
   for (std::size_t i = 1; i < args.size(); ++i) {
     const std::string_view arg = args[i];
-    if (arg == "--") {
-      break;
-    }
-    // `aws configure export-credentials` prints the resolved credentials to
-    // whoever started the CLI, defeating the point of the helper.
-    if (arg == "export-credentials") {
+    // The entry point checks for the exact auto-prompt flag before parsing,
+    // even after a delimiter. It can replace the command in argv.
+    if (arg == kAutoPromptOption) {
       return args[i];
     }
-    if (!starts_with(arg, "--")) {
+    if (arg == "--") {
+      after_delimiter = true;
+      value_expected = false;
       continue;
     }
-    const std::string_view name = arg.substr(0, arg.find('='));
-    for (const auto forbidden : kForbiddenOptions) {
-      // argparse accepts unambiguous prefixes, so "--endpoint" must be
-      // refused as well as "--endpoint-url". Require "--" plus one letter.
-      if (name.size() >= 3 && starts_with(forbidden, name)) {
-        return args[i];
+    if (!after_delimiter && starts_with(arg, "--")) {
+      const auto equals = arg.find('=');
+      const auto name = arg.substr(0, equals);
+      for (const auto forbidden : kForbiddenOptions) {
+        // argparse accepts unambiguous prefixes such as "--endpoint".
+        if (name.size() >= 3 && starts_with(forbidden, name)) {
+          return args[i];
+        }
       }
+      value_expected =
+          equals == std::string_view::npos &&
+          std::any_of(
+              std::begin(kGlobalValueOptions), std::end(kGlobalValueOptions),
+              [name](auto option) { return starts_with(option, name); });
+      continue;
+    }
+    if (value_expected) {
+      value_expected = false;
+      continue;
+    }
+    if (starts_with(arg, "-")) {
+      continue;
+    }
+    // Each parser can consume a delimiter before its command name. Resolve
+    // those names before treating tokens past a delimiter as positional data.
+    if (arg == "export-credentials" &&
+        (!after_delimiter || (command == "configure" && !have_subcommand))) {
+      return args[i];
+    }
+    if (command.empty()) {
+      command = arg;
+    } else {
+      have_subcommand = true;
     }
   }
   return std::nullopt;
@@ -560,9 +642,9 @@ SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
                    "AWS CLI environment variable not allowed");
   }
 
-  const auto plugin_config = verify_plugin_config(*environment);
-  if (plugin_config.result != std::errc{}) {
-    return plugin_config;
+  const auto cli_config = verify_cli_config(*environment);
+  if (!cli_config.passed()) {
+    return cli_config;
   }
 
   const auto maps = ProcessInfo::readProc(pid, "maps", 16U << 20);

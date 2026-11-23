@@ -28,7 +28,8 @@ namespace methuselah {
 //     `configure export-credentials`, ...).
 //  5. Its start-up environment carries no user-controlled loader, interpreter,
 //     endpoint, or trust-store overrides.
-//  6. Its CLI config is root controlled and has no plugin section.
+//  6. Its CLI configuration files are root controlled, with no plugins
+//     or auto-prompt activation.
 //  7. Every executable file mapping is trusted, except libffi trampolines.
 class AwsCliVerifier {
 public:
@@ -64,8 +65,10 @@ public:
   forbidden_environment(std::string_view environment,
                         std::string_view bundle_library_path = {});
 
-  // Scans a trusted AWS config for a top-level plugins section.
-  [[nodiscard]] static SecurityVerdict scan_plugin_config(std::istream &stream);
+  // Scans a trusted AWS config or credentials file for auto-prompt; only
+  // the config file can supply plugins.
+  [[nodiscard]] static SecurityVerdict scan_cli_config(std::istream &stream,
+                                                       bool check_plugins);
 
   // Returns the offending argument.
   [[nodiscard]] static std::optional<std::string>

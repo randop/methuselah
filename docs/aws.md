@@ -70,6 +70,10 @@ sudo install -d -m 755 /etc/methuselah
 sha256sum "$(readlink -f /usr/local/bin/aws)" | sudo tee /etc/methuselah/aws-cli.sha256
 ```
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:6a3cb1f5030667c7ab6e8ffa5546c1990201e6fdac418bc66f1a7da96a4c464d -->
+
 ### What is verified
 
 The helper prints nothing and exits non-zero unless the caller:
@@ -84,15 +88,19 @@ The helper prints nothing and exits non-zero unless the caller:
 - matches a pinned SHA-256, when `/etc/methuselah/aws-cli.sha256` exists;
 - has no tracer attached;
 - was not started with `--endpoint-url`, `--ca-bundle`, `--no-verify-ssl`,
-  `--debug`, or `configure export-credentials`;
+  `--debug`, `--cli-auto-prompt`, or `configure export-credentials`;
 - was not started with loader overrides (the official Linux bundle's
   `LD_LIBRARY_PATH` is allowed only when it names its own trusted directory),
   `PYTHON*`, `MALLOC_*`, `AWS_ENDPOINT_URL*`,
   `AWS_CA_BUNDLE`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, or common
   CA-bundle (`SSL_CERT_*`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`) variables;
-- uses a root-controlled configuration path with no `[plugins]` section;
+- uses root-controlled `.aws/config` and `.aws/credentials` files, if present,
+  with no `[plugins]` section in `config` and no auto-prompt setting other than
+  `off` in either file; `AWS_CLI_AUTO_PROMPT` must also be unset or `off`;
 - maps only trusted files as executable code, apart from libffi trampolines.
 
+
+<!-- /coderabbit-ai-generated:v1 -->
 The check runs before the passphrase prompt and again just before the
 credentials are written.
 
