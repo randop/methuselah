@@ -578,8 +578,7 @@ SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
   if (::lstat(options_.pin_file.c_str(), &pinInfo) == 0) {
     const auto pinPath = Security::trusted_file(options_.pin_file);
     if (!pinPath) {
-      return verdict(std::errc::io_error,
-                     "AWS CLI pin file is not root-owned");
+      return verdict(std::errc::io_error, "AWS CLI pin file is not root-owned");
     }
     const int pinFd = ::open(pinPath->c_str(), O_RDONLY | O_CLOEXEC);
     if (pinFd < 0) {

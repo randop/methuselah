@@ -214,9 +214,8 @@ bool reject_unverified(const char *macro, const SecurityVerdict &verdict) {
     return false;
   }
   std::cerr << "Error: " << macro << " macro security verification "
-            << (verdict.result == std::errc::permission_denied
-                    ? "failure"
-                    : "faulted")
+            << (verdict.result == std::errc::permission_denied ? "failure"
+                                                               : "faulted")
             << ": " << verdict.reason << std::endl;
   return true;
 }

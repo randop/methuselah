@@ -271,14 +271,12 @@ SecurityVerdict Security::verify_gpg() const {
 SecurityVerdict Security::verify_ssh() const {
   const auto sshBinary = SSHhelper::locateBinary();
   if (!sshBinary) {
-    return {std::errc::io_error,
-            "ssh was not found in a trusted location"};
+    return {std::errc::io_error, "ssh was not found in a trusted location"};
   }
 
   const auto caller = ProcessInfo::caller();
   if (!caller || caller->exe == "<unavailable>") {
-    return {std::errc::io_error,
-            "caller process or executable is unavailable"};
+    return {std::errc::io_error, "caller process or executable is unavailable"};
   }
 
   SPDLOG_TRACE("caller: {}", caller->exe);
@@ -306,8 +304,7 @@ SecurityVerdict Security::verify_ssh() const {
 
   const auto sshAdd = SSHhelper::locateBinary("ssh-add");
   if (!sshAdd) {
-    return {std::errc::io_error,
-            "ssh-add was not found in a trusted location"};
+    return {std::errc::io_error, "ssh-add was not found in a trusted location"};
   }
   const auto sshAddPath = std::filesystem::weakly_canonical(*sshAdd, ec);
   if (ec) {
