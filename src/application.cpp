@@ -223,14 +223,6 @@ bool reject_unverified(const char *macro, const SecurityVerdict &verdict) {
   return true;
 }
 
-bool valid_profile_name(std::string_view name) {
-  return !name.empty() && name.size() <= 64 &&
-         std::all_of(name.begin(), name.end(), [](unsigned char c) {
-           return std::isalnum(c) != 0 || c == '_' || c == '-' || c == '.' ||
-                  c == '@';
-         });
-}
-
 class CredentialFile {
 public:
   explicit CredentialFile(const std::filesystem::path &path)
@@ -313,12 +305,16 @@ unlock_credentials(const GpgDecryptor &decryptor, int fd,
   PromptOptions options;
   options.title = "aws credentials";
   options.message = kDefaultMessage;
-  options.timeout_seconds = kUnlockBudgetSeconds;
 
   const auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::seconds(kUnlockBudgetSeconds);
-  while (!SignalGuard::received() &&
-         std::chrono::steady_clock::now() < deadline) {
+  while (!SignalGuard::received()) {
+    const auto remaining = deadline - std::chrono::steady_clock::now();
+    if (remaining <= std::chrono::steady_clock::duration::zero()) {
+      break;
+    }
+    options.timeout_seconds = static_cast<int>(
+        std::chrono::ceil<std::chrono::seconds>(remaining).count());
     std::optional<SecureString> password = ui.prompt_password(options);
     if (!password) {
       break;
@@ -339,13 +335,13 @@ unlock_credentials(const GpgDecryptor &decryptor, int fd,
 
 int run_aws_flow(const std::string &profile, pid_t caller,
                  const Security &security) {
-  if (!valid_profile_name(profile)) {
+  if (!AwsSigners::valid_profile_name(profile)) {
     std::cerr << "Error: invalid aws profile name" << std::endl;
     return EXIT_FAILURE;
   }
 
-  // credential_process output must go to a pipe the verified CLI reads, never
-  // a terminal, a file, or a pipe some other process holds the end of.
+  // Check that the verified CLI holds a read end and that no other reader
+  // is visible in /proc at this point. This cannot guarantee exclusive access.
   if (reject_unverified("aws", AwsCliVerifier::verify_output_channel(
                                    caller, STDOUT_FILENO))) {
     return EXIT_FAILURE;

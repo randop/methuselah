@@ -621,6 +621,7 @@ void test_expiry_window() {
   CHECK(parse_ok(text(15 * 60 + 1)));
   // Inside botocore's refresh window the CLI would re-run the helper (and the
   // passphrase prompt) on every call.
+  CHECK(!parse_ok(text(15 * 60)));
   CHECK(!parse_ok(text(15 * 60 - 1)));
   CHECK(!parse_ok(text(60)));
   CHECK(parse_error(text(60)).find("15 minutes") != std::string::npos);
@@ -648,6 +649,10 @@ void test_unsafe_mappings() {
         V::UnsafeMapping::anonymous_writable_executable);
   CHECK(V::unsafe_mapping("7f30-7f31 rwxp 00000000 08:01 9  /usr/lib/x.so\n") ==
         V::UnsafeMapping::file_writable_executable);
+  CHECK(V::unsafe_mapping("7f10-7f11 r-xp 00000000 00:00 0 \n"
+                          "7f20-7f21 rwxs 00000000 00:01 77  "
+                          "/memfd:libffi (deleted)\n") ==
+        V::UnsafeMapping::file_writable_executable);
   CHECK(V::unsafe_mapping(file_exec + "7f40-7f41 r-xp 00000000 00:00 0 \n") ==
         V::UnsafeMapping::anonymous_executable);
   CHECK(V::unsafe_mapping("7f40-7f41 r-xp 00000000 00:00 0   [anon:evil]\n") ==
@@ -666,6 +671,35 @@ void test_ptrace_scope_parse() {
     CHECK(!V::parse_ptrace_scope(bad).has_value());
   }
 }
+
+class PolicyFixture {
+public:
+  PolicyFixture() {
+    if (const char *dir = ::mkdtemp(directory_)) {
+      file = std::filesystem::path(dir) / "policy";
+    }
+  }
+  ~PolicyFixture() {
+    if (!file.empty()) {
+      ::unlink(file.c_str());
+      ::rmdir(directory_);
+    }
+  }
+
+  bool write(std::string_view text) const {
+    std::ofstream out(file);
+    out << text;
+    out.close();
+    CHECK(out.good());
+    return out.good();
+  }
+
+  std::filesystem::path file;
+
+private:
+  char directory_[sizeof("/tmp/methuselah-policy-XXXXXX")] =
+      "/tmp/methuselah-policy-XXXXXX";
+};
 
 void test_signer_policy() {
   using S = AwsSigners;
@@ -695,23 +729,46 @@ void test_signer_policy() {
   // closed rather than silently dropping the requirement.
   const auto none = S::load("/nonexistent/methuselah/aws-signers", "prod");
   CHECK(none.passed() && !none.required());
-  const std::string path =
-      "/tmp/methuselah-signers-test-" + std::to_string(::getpid());
-  {
-    std::ofstream out(path);
-    out << "prod " << fpr40 << "\n";
+  CHECK(!S::parse("../prod " + fpr40));
+  CHECK(!S::parse(std::string("prod\0suffix", 11) + " " + fpr40));
+  CHECK(!S::parse(std::string(65, 'a') + " " + fpr40));
+  CHECK(S::parse("prod_1-dev.example@team " + fpr40).has_value());
+
+  const PolicyFixture fixture;
+  CHECK(!fixture.file.empty());
+  if (fixture.file.empty() || !fixture.write("prod " + fpr40 + "\n")) {
+    return;
   }
-  const auto untrusted = S::load(path, "prod");
+  const auto untrusted = S::load(fixture.file, "prod");
   CHECK(untrusted.result == std::errc::io_error && !untrusted.required());
-  ::unlink(path.c_str());
 }
 
 void test_output_channel() {
   using V = AwsCliVerifier;
   int fds[2];
-  CHECK(::pipe2(fds, O_CLOEXEC) == 0);
+  const int pipe_result = ::pipe2(fds, O_CLOEXEC);
+  CHECK(pipe_result == 0);
+  if (pipe_result != 0) {
+    return;
+  }
   // This process holds both ends, so it counts as the reader.
   CHECK(V::verify_output_channel(::getpid(), fds[1]).passed());
+
+  const pid_t reader = ::fork();
+  if (reader == 0) {
+    ::close(fds[1]);
+    for (;;) {
+      ::pause();
+    }
+  }
+  CHECK(reader > 0);
+  if (reader > 0) {
+    const auto verdict = V::verify_output_channel(::getpid(), fds[1]);
+    CHECK(verdict.reason == "another process holds a read end of stdout");
+    ::kill(reader, SIGKILL);
+    ::waitpid(reader, nullptr, 0);
+    CHECK(V::verify_output_channel(::getpid(), fds[1]).passed());
+  }
 
   // Not a pipe at all.
   const int null = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
@@ -789,6 +846,52 @@ void test_anonymous_exec_waiver() {
   options.anonymous_exec_waiver_file = "/tmp"; // not a root-owned file
   CHECK(AwsCliVerifier(options).verify(child.pid).result ==
         std::errc::permission_denied);
+}
+
+// Reserve two pages and replace the second with a file mapping, so the
+// anonymous executable entry precedes the writable executable file entry.
+void test_file_mapping_with_waiver() {
+  const auto python = Security::trusted_executable("/usr/bin/python3");
+  if (!python || !Security::trusted_file("/etc/passwd")) {
+    std::printf(
+        "SKIP mixed executable maps: need trusted python3 and /etc/passwd\n");
+    return;
+  }
+  AwsCliVerifier::Options options;
+  options.min_ptrace_scope = 0;
+  options.candidates = {"/usr/bin/python3"};
+  options.required_name = python->filename().string();
+  options.pin_file = "/nonexistent/methuselah/pin";
+  options.anonymous_exec_waiver_file = "/etc/passwd";
+
+  Child child = spawn(python->string(), {"python3", "-c", R"PY(
+import ctypes, mmap, os, time
+map_pages = ctypes.CDLL(None).mmap
+map_pages.restype = ctypes.c_void_p
+map_pages.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
+                      ctypes.c_int, ctypes.c_int, ctypes.c_long)
+page = mmap.PAGESIZE
+rwx = mmap.PROT_READ | mmap.PROT_WRITE | mmap.PROT_EXEC
+base = map_pages(None, 2 * page, rwx, mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS, -1, 0)
+assert base != ctypes.c_void_p(-1).value
+map_fixed = 0x10  # Linux MAP_FIXED
+fd = os.open('/etc/passwd', os.O_RDONLY)
+assert map_pages(base + page, page, rwx, mmap.MAP_PRIVATE | map_fixed, fd, 0) == base + page
+time.sleep(10)
+)PY"},
+                      {"HOME=/"});
+  CHECK(wait_for_exec(child.pid, python->string()));
+  for (int i = 0; i < 60; ++i) {
+    const auto maps = ProcessInfo::readProc(child.pid, "maps", 16U << 20);
+    if (maps && maps->find("/etc/passwd") != std::string::npos) {
+      const auto verdict = AwsCliVerifier(options).verify(child.pid);
+      CHECK(verdict.result == std::errc::permission_denied);
+      CHECK(verdict.reason == "AWS CLI has a writable executable file mapping");
+      return;
+    }
+    ::usleep(50'000);
+  }
+  CHECK(false); // The mixed mapping fixture did not become ready.
 }
 
 void test_verify() {
@@ -874,30 +977,40 @@ void test_verify() {
   }
   {
     // Yama must stop a same-user parent from attaching to the AWS CLI.
-    const std::string scope_file =
-        "/tmp/methuselah-ptrace-test-" + std::to_string(::getpid());
-    const auto write_scope = [&](const char *text) {
-      std::ofstream out(scope_file, std::ios::trunc);
-      out << text;
-    };
+    const PolicyFixture fixture;
+    CHECK(!fixture.file.empty());
+    if (fixture.file.empty()) {
+      return;
+    }
+    const auto &scope_file = fixture.file;
     AwsCliVerifier::Options strict = options;
     strict.min_ptrace_scope = 2;
     strict.ptrace_scope_file = scope_file;
     Child ok = spawn(shell->string(), sh_args, clean_env);
     CHECK(wait_for_exec(ok.pid, shell->string()));
 
-    write_scope("1\n");
+    if (!fixture.write("1\n")) {
+      return;
+    }
     CHECK(AwsCliVerifier(strict).verify(ok.pid).result ==
           std::errc::permission_denied);
-    write_scope("0\n");
+    if (!fixture.write("0\n")) {
+      return;
+    }
     CHECK(AwsCliVerifier(strict).verify(ok.pid).result ==
           std::errc::permission_denied);
-    write_scope("banana\n");
+    if (!fixture.write("banana\n")) {
+      return;
+    }
     CHECK(AwsCliVerifier(strict).verify(ok.pid).result ==
           std::errc::permission_denied);
-    write_scope("2\n");
+    if (!fixture.write("2\n")) {
+      return;
+    }
     CHECK(AwsCliVerifier(strict).verify(ok.pid).passed());
-    write_scope("3\n");
+    if (!fixture.write("3\n")) {
+      return;
+    }
     CHECK(AwsCliVerifier(strict).verify(ok.pid).passed());
 
     // No Yama at all is refused too, unless a root-owned waiver exists.
@@ -956,6 +1069,7 @@ int main() {
   test_service_install();
   test_verify();
   test_anonymous_exec_waiver();
+  test_file_mapping_with_waiver();
 
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

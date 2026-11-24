@@ -465,6 +465,7 @@ AwsCliVerifier::executable_mapping_paths(std::string_view maps) {
 
 AwsCliVerifier::UnsafeMapping
 AwsCliVerifier::unsafe_mapping(std::string_view maps) {
+  auto anonymous_mapping = UnsafeMapping::none;
   while (!maps.empty()) {
     const auto nl = maps.find('\n');
     const std::string_view line = maps.substr(0, nl);
@@ -473,20 +474,20 @@ AwsCliVerifier::unsafe_mapping(std::string_view maps) {
 
     const auto entry = parse_map_line(line);
     if (!entry || entry->perms.size() < 3 || entry->perms[2] != 'x' ||
-        allowed_special_mapping(entry->path) || entry->path == "[vdso]" ||
-        entry->path == "[vsyscall]") {
+        entry->path == "[vdso]" || entry->path == "[vsyscall]") {
       continue;
     }
     const bool anonymous = entry->path.empty() || entry->path.front() != '/';
-    if (entry->perms[1] == 'w') {
-      return anonymous ? UnsafeMapping::anonymous_writable_executable
-                       : UnsafeMapping::file_writable_executable;
+    if (!anonymous && entry->perms[1] == 'w') {
+      return UnsafeMapping::file_writable_executable;
     }
-    if (anonymous) {
-      return UnsafeMapping::anonymous_executable;
+    if (anonymous && anonymous_mapping == UnsafeMapping::none) {
+      anonymous_mapping = entry->perms[1] == 'w'
+                              ? UnsafeMapping::anonymous_writable_executable
+                              : UnsafeMapping::anonymous_executable;
     }
   }
-  return UnsafeMapping::none;
+  return anonymous_mapping;
 }
 
 std::optional<int> AwsCliVerifier::parse_ptrace_scope(std::string_view text) {
@@ -537,43 +538,68 @@ SecurityVerdict AwsCliVerifier::verify_output_channel(pid_t caller, int fd) {
     return verdict(std::errc::permission_denied,
                    "stdout must be a pipe from the AWS CLI");
   }
+  const auto holds_read_end = [&](pid_t pid, std::error_code &ec) {
+    std::filesystem::directory_iterator it(proc_link(pid, "fd"), ec);
+    for (const std::filesystem::directory_iterator end; !ec && it != end;
+         it.increment(ec)) {
+      struct stat peer{};
+      if (::stat(it->path().c_str(), &peer) != 0 || !S_ISFIFO(peer.st_mode) ||
+          !same_file(peer, out)) {
+        continue;
+      }
+      const auto info = ProcessInfo::readProc(
+          pid, ("fdinfo/" + it->path().filename().string()).c_str(), 4096);
+      if (!info) {
+        continue;
+      }
+      const auto flags = info->find("flags:");
+      if (flags == std::string::npos) {
+        continue;
+      }
+      const char *first = info->c_str() + flags + 6;
+      char *last = nullptr;
+      const long mode = std::strtol(first, &last, 8);
+      if (first != last && (mode & O_PATH) == 0 &&
+          ((mode & O_ACCMODE) == O_RDONLY || (mode & O_ACCMODE) == O_RDWR)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   std::error_code ec;
-  std::filesystem::directory_iterator it(proc_link(caller, "fd"), ec);
-  if (ec) {
-    return verdict(std::errc::io_error,
-                   "cannot inspect caller file descriptors");
-  }
-  for (const std::filesystem::directory_iterator end; it != end;
-       it.increment(ec)) {
+  if (!holds_read_end(caller, ec)) {
     if (ec) {
-      break;
+      return verdict(std::errc::io_error,
+                     "cannot inspect caller file descriptors");
     }
-    struct stat peer{};
-    if (::stat(it->path().c_str(), &peer) != 0 || !S_ISFIFO(peer.st_mode) ||
-        !same_file(peer, out)) {
+    return verdict(std::errc::permission_denied,
+                   "stdout is not a pipe read by the AWS CLI");
+  }
+
+  // /proc can hide processes or descriptors from this user. A scan can
+  // reject visible readers, but cannot prove current or future exclusivity.
+  std::filesystem::directory_iterator proc("/proc", ec);
+  for (const std::filesystem::directory_iterator end; !ec && proc != end;
+       proc.increment(ec)) {
+    const auto name = proc->path().filename().string();
+    pid_t pid = 0;
+    const auto [last, error] =
+        std::from_chars(name.data(), name.data() + name.size(), pid);
+    if (error != std::errc{} || last != name.data() + name.size() || pid <= 0 ||
+        pid == caller) {
       continue;
     }
-    // The caller must hold the read side, not just any end of the pipe.
-    const auto info = ProcessInfo::readProc(
-        caller, ("fdinfo/" + it->path().filename().string()).c_str(), 4096);
-    if (!info) {
-      continue;
-    }
-    const auto flags = info->find("flags:");
-    if (flags == std::string::npos) {
-      continue;
-    }
-    const long mode = std::strtol(info->c_str() + flags + 6, nullptr, 8);
-    if ((mode & O_ACCMODE) != O_WRONLY) {
-      return verdict(std::errc{}, "ok");
+    std::error_code peer_ec;
+    if (holds_read_end(pid, peer_ec)) {
+      return verdict(std::errc::permission_denied,
+                     "another process holds a read end of stdout");
     }
   }
   if (ec) {
-    return verdict(std::errc::io_error,
-                   "cannot inspect caller file descriptors");
+    return verdict(std::errc::io_error, "cannot scan /proc for pipe readers");
   }
-  return verdict(std::errc::permission_denied,
-                 "stdout is not a pipe read by the AWS CLI");
+  return verdict(std::errc{}, "ok");
 }
 
 std::optional<std::vector<std::string>>

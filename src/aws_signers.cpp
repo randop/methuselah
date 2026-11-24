@@ -48,6 +48,14 @@ std::filesystem::path AwsSigners::default_file() {
   return "/etc/methuselah/aws-signers";
 }
 
+bool AwsSigners::valid_profile_name(std::string_view name) {
+  return !name.empty() && name.size() <= 64 &&
+         std::all_of(name.begin(), name.end(), [](unsigned char c) {
+           return std::isalnum(c) != 0 || c == '_' || c == '-' || c == '.' ||
+                  c == '@';
+         });
+}
+
 std::optional<AwsSigners::Entries> AwsSigners::parse(std::string_view text) {
   Entries entries;
   while (!text.empty()) {
@@ -64,7 +72,7 @@ std::optional<AwsSigners::Entries> AwsSigners::parse(std::string_view text) {
     }
     const std::string_view profile = line.substr(0, space);
     const std::string_view fingerprint = trim(line.substr(space));
-    if (!is_fingerprint(fingerprint)) {
+    if (!valid_profile_name(profile) || !is_fingerprint(fingerprint)) {
       return std::nullopt;
     }
     const bool duplicate =

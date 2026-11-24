@@ -75,8 +75,8 @@ public:
 
   [[nodiscard]] SecurityVerdict verify(pid_t pid) const;
 
-  // Confirms that `fd` is a pipe whose read end the verified caller holds, so
-  // the credentials can only be read by that process.
+  // Confirms that the verified caller holds a read end of `fd`'s pipe and
+  // rejects other readers visible during the /proc scan.
   [[nodiscard]] static SecurityVerdict verify_output_channel(pid_t caller,
                                                              int fd);
 
@@ -114,8 +114,8 @@ public:
     anonymous_executable,
   };
 
-  // Inspects /proc/<pid>/maps for executable memory that no file vouches for
-  // ([vdso], [vsyscall] and the libffi trampoline memfd are exempt).
+  // Checks /proc/<pid>/maps for writable executable files and anonymous
+  // executable memory ([vdso] and [vsyscall] are exempt).
   [[nodiscard]] static UnsafeMapping unsafe_mapping(std::string_view maps);
 
   // Parses the content of /proc/sys/kernel/yama/ptrace_scope (0 to 3).

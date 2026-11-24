@@ -250,7 +250,10 @@ refuses that variable.
 
 Credentials are written only to a pipe whose read end the verified AWS CLI
 holds, which is how `credential_process` invokes the helper. A terminal, a
-regular file, a socket, or a pipe read by any other process is refused.
+regular file, a socket, or a pipe with another reader visible through
+`/proc` is refused. The helper checks before prompting and again before
+writing. These checks are snapshots: they cannot detect readers hidden from
+the helper or prevent a reader from acquiring a descriptor after the scan.
 Cancelling the passphrase prompt fails the request, and the prompt closes by
 itself after two minutes. Concurrent calls wait for one another for up to
 three minutes, in no guaranteed order; if the lock cannot be taken, the
@@ -287,9 +290,12 @@ a same-user parent from attaching:
 
 ```bash
 echo 'kernel.yama.ptrace_scope = 2' |
-  sudo tee /etc/sysctl.d/10-methuselah-ptrace.conf
+  sudo tee /etc/sysctl.d/99-methuselah-ptrace.conf
 sudo sysctl --system
+sysctl kernel.yama.ptrace_scope
 ```
+
+Confirm that the effective value is 2 or 3 before using the helper.
 
 Scope 2 also stops debuggers such as `gdb -p` and `strace -p` from attaching
 without `sudo`. If you cannot or will not accept that, create a root-owned
@@ -635,9 +641,9 @@ The helper writes no credentials, and exits non-zero, unless the caller:
   through paths with the same ownership rules, apart from libffi's
   `/memfd:libffi` trampoline. Other deleted mappings are refused. No mapping
   may be a writable and executable file mapping, and none may be anonymous
-  and executable (`[vdso]`, `[vsyscall]`, and the libffi trampoline are
-  exempt). Anonymous executable memory is what injected code looks like, but
-  some libffi builds also use it for closures; if your AWS CLI trips this
+  and executable (`[vdso]` and `[vsyscall]` are exempt). Anonymous executable
+  memory can hold injected code, but some libffi builds also use it for
+  closures; if your AWS CLI trips this
   check (`AWS CLI has ... executable memory`), accept it with a root-owned
   waiver: `sudo touch /etc/methuselah/allow-anonymous-exec`. A writable and
   executable *file* mapping is always refused;

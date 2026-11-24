@@ -43,6 +43,8 @@ public:
 
   [[nodiscard]] static std::filesystem::path default_file();
 
+  [[nodiscard]] static bool valid_profile_name(std::string_view name);
+
   // Reads and checks `file`, then looks `profile` up.
   [[nodiscard]] static Lookup load(const std::filesystem::path &file,
                                    std::string_view profile);

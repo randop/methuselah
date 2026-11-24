@@ -200,9 +200,9 @@ AwsParseResult AwsCredentials::parse(std::string_view text, std::time_t now) {
     if (*expiry <= now) {
       return {std::errc::invalid_argument, "credentials have expired", {}};
     }
-    if (*expiry - now < kMinRemainingSeconds) {
+    if (*expiry - now <= kMinRemainingSeconds) {
       return {std::errc::invalid_argument,
-              "credentials expire in under 15 minutes; refresh them",
+              "credentials expire in 15 minutes or less; refresh them",
               {}};
     }
   } else if (haveToken) {
