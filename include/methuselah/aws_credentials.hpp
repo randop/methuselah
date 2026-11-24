@@ -52,7 +52,8 @@ public:
 
   // Parses credentials and returns a result with a standard error condition,
   // a short reason, and the parsed credentials. On failure `credentials` is
-  // empty. Credentials whose expiration is not after `now` are refused.
+  // empty. Credentials that have expired, or expire within 15 minutes of
+  // `now` (the CLI would re-run the helper on every call), are refused.
   [[nodiscard]] static AwsParseResult
   parse(std::string_view text, std::time_t now = std::time(nullptr));
 

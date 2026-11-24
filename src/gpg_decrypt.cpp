@@ -1,8 +1,10 @@
 #include "methuselah/gpg_decrypt.hpp"
 
+#include <cctype>
 #include <cerrno>
 #include <gpgme.h>
 #include <string>
+#include <string_view>
 #include <unistd.h>
 
 namespace methuselah {
@@ -85,8 +87,64 @@ private:
   gpgme_data_t data_ = nullptr;
 };
 
+bool same_fingerprint(const char *actual, std::string_view required) {
+  if (actual == nullptr) {
+    return false;
+  }
+  const std::string_view have(actual);
+  if (have.size() != required.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < have.size(); ++i) {
+    if (std::toupper(static_cast<unsigned char>(have[i])) !=
+        std::toupper(static_cast<unsigned char>(required[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// True only when every signature on the message is good and at least one is
+// made by `required` (the signing key itself or the primary key it belongs
+// to). Trust in the key is not consulted: the caller pinned the fingerprint.
+bool signed_by(gpgme_ctx_t ctx, std::string_view required) {
+  const gpgme_verify_result_t verdict = gpgme_op_verify_result(ctx);
+  if (verdict == nullptr || verdict->signatures == nullptr) {
+    return false;
+  }
+  bool matched = false;
+  for (gpgme_signature_t sig = verdict->signatures; sig != nullptr;
+       sig = sig->next) {
+    if (gpgme_err_code(sig->status) != GPG_ERR_NO_ERROR) {
+      return false;
+    }
+    if (same_fingerprint(sig->fpr, required)) {
+      matched = true;
+      continue;
+    }
+    if (sig->fpr == nullptr) {
+      continue;
+    }
+    // A signing subkey: compare its primary key. A separate context keeps the
+    // verification result above intact.
+    GpgmeContext lookup;
+    gpgme_key_t key = nullptr;
+    if (lookup.ok() &&
+        gpgme_get_key(lookup.get(), sig->fpr, &key, 0) == GPG_ERR_NO_ERROR &&
+        key != nullptr) {
+      if (key->subkeys != nullptr &&
+          same_fingerprint(key->subkeys->fpr, required)) {
+        matched = true;
+      }
+      gpgme_key_unref(key);
+    }
+  }
+  return matched;
+}
+
 template <typename OpenCipher>
-DecryptResult decrypt(const SecureString &passphrase, OpenCipher open_cipher) {
+DecryptResult decrypt(const SecureString &passphrase, OpenCipher open_cipher,
+                      std::string_view required_signer = {}) {
   DecryptResult result;
 
   gpgme_check_version(nullptr);
@@ -117,9 +175,15 @@ DecryptResult decrypt(const SecureString &passphrase, OpenCipher open_cipher) {
     return result;
   }
 
-  err = gpgme_op_decrypt(ctx.get(), cipher.get(), plain.get());
+  const bool verify = !required_signer.empty();
+  err = verify ? gpgme_op_decrypt_verify(ctx.get(), cipher.get(), plain.get())
+               : gpgme_op_decrypt(ctx.get(), cipher.get(), plain.get());
   if (err) {
     result.set_error(gpgme_strerror(err));
+    return result;
+  }
+  if (verify && !signed_by(ctx.get(), required_signer)) {
+    result.set_error(GpgDecryptor::kNotSignedError);
     return result;
   }
 
@@ -145,15 +209,16 @@ DecryptResult GpgDecryptor::decrypt_file(const std::filesystem::path &gpg_path,
   });
 }
 
-DecryptResult GpgDecryptor::decrypt_fd(int fd,
-                                       const SecureString &passphrase) const {
+DecryptResult GpgDecryptor::decrypt_fd(int fd, const SecureString &passphrase,
+                                       std::string_view required_signer) const {
   if (::lseek(fd, 0, SEEK_SET) == -1) {
     DecryptResult result;
     result.set_error("cannot rewind encrypted credentials");
     return result;
   }
-  return decrypt(passphrase,
-                 [&](GpgmeData &cipher) { return cipher.from_fd(fd); });
+  return decrypt(
+      passphrase, [&](GpgmeData &cipher) { return cipher.from_fd(fd); },
+      required_signer);
 }
 
 } // namespace methuselah

@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace methuselah {
@@ -48,13 +49,22 @@ private:
 
 class GpgDecryptor {
 public:
+  // Error text of a decryption that worked but lacked the required signature.
+  // Retrying with another passphrase cannot fix it.
+  static constexpr const char *kNotSignedError =
+      "credentials are not signed by the required key";
+
   [[nodiscard]] DecryptResult
   decrypt_file(const std::filesystem::path &gpg_path,
                const SecureString &passphrase) const;
 
-  // Borrows fd and rewinds it before each attempt.
-  [[nodiscard]] DecryptResult decrypt_fd(int fd,
-                                         const SecureString &passphrase) const;
+  // Borrows fd and rewinds it before each attempt. A non-empty
+  // `required_signer` (hex fingerprint of the signing key or its primary key)
+  // makes decryption fail unless the message carries a good signature from
+  // exactly that key.
+  [[nodiscard]] DecryptResult
+  decrypt_fd(int fd, const SecureString &passphrase,
+             std::string_view required_signer = {}) const;
 };
 
 } // namespace methuselah

@@ -47,6 +47,11 @@ bool all_of_set(std::string_view value, std::string_view allowed) {
   });
 }
 
+// botocore refreshes temporary credentials once fewer than about 15 minutes
+// remain, so a shorter lifetime would make the CLI call this helper (and the
+// passphrase prompt) again for every request.
+constexpr std::time_t kMinRemainingSeconds = 15 * 60;
+
 constexpr std::string_view kUpperAlnum = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 constexpr std::string_view kBase64 =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
@@ -194,6 +199,11 @@ AwsParseResult AwsCredentials::parse(std::string_view text, std::time_t now) {
     }
     if (*expiry <= now) {
       return {std::errc::invalid_argument, "credentials have expired", {}};
+    }
+    if (*expiry - now < kMinRemainingSeconds) {
+      return {std::errc::invalid_argument,
+              "credentials expire in under 15 minutes; refresh them",
+              {}};
     }
   } else if (haveToken) {
     // Temporary credentials with no expiry would be cached by the CLI

@@ -12,7 +12,9 @@
 #include <array>
 #include <cctype>
 #include <cerrno>
+#include <charconv>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <optional>
 #include <set>
@@ -51,7 +53,7 @@ std::string proc_link(pid_t pid, const char *leaf) {
 // Exact names (or "NAME*" prefixes) that must not be present in the AWS CLI's
 // start-up environment. Each either injects code into the process or lets
 // the caller steer where, or over which trust store, credentials are sent.
-constexpr std::array<std::string_view, 20> kForbiddenEnvironment = {
+constexpr std::array<std::string_view, 21> kForbiddenEnvironment = {
     "LD_*",              // loader injection: LD_PRELOAD, LD_LIBRARY_PATH, ...
     "PYTHON*",           // interpreter hooks: PYTHONPATH, PYTHONSTARTUP, ...
     "MALLOC_*",          // allocator hooks
@@ -71,11 +73,23 @@ constexpr std::array<std::string_view, 20> kForbiddenEnvironment = {
     "CURL_CA_BUNDLE",
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
+    "OPENSSL_*",      // OPENSSL_CONF/MODULES/ENGINES load code or swap trust
     "SSLKEYLOGFILE"}; // writes TLS session secrets to disk
+
+constexpr std::string_view kAutoPromptEnv = "AWS_CLI_AUTO_PROMPT";
+
+// Every other AWS_* variable can steer endpoints, credentials sources or
+// service models, so the AWS CLI's AWS_* namespace is deny-by-default. These
+// are the only ones that cannot move credentials or load anything.
+// AWS_CLI_AUTO_PROMPT is vetted separately: only "off" gets this far.
+constexpr std::array<std::string_view, 11> kAllowedAwsEnvironment = {
+    "AWS_PROFILE",           "AWS_DEFAULT_PROFILE", "AWS_REGION",
+    "AWS_DEFAULT_REGION",    "AWS_DEFAULT_OUTPUT",  "AWS_PAGER",
+    "AWS_MAX_ATTEMPTS",      "AWS_RETRY_MODE",      "AWS_EC2_METADATA_DISABLED",
+    "AWS_CLI_FILE_ENCODING", kAutoPromptEnv};
 
 // Long options that redirect, weaken, or dump credential handling.
 constexpr std::string_view kAutoPromptOption = "--cli-auto-prompt";
-constexpr std::string_view kAutoPromptEnv = "AWS_CLI_AUTO_PROMPT";
 constexpr std::string_view kAutoPromptConfig = "cli_auto_prompt";
 constexpr std::array<std::string_view, 5> kForbiddenOptions = {
     "--endpoint-url", "--ca-bundle", "--no-verify-ssl", "--debug",
@@ -189,8 +203,9 @@ SecurityVerdict verify_cli_config(std::string_view environment) {
   const auto trusted_home =
       Security::trusted_directory(std::filesystem::path(*home));
   if (!trusted_home) {
-    return verdict(std::errc::permission_denied,
-                   "AWS CLI home must be root controlled");
+    return verdict(
+        std::errc::permission_denied,
+        "AWS CLI home must be root controlled (set HOME, see docs/aws.md)");
   }
   const auto config_dir = *trusted_home / ".aws";
   struct stat info{};
@@ -229,6 +244,34 @@ SecurityVerdict verify_cli_config(std::string_view environment) {
     }
   }
   return verdict(std::errc{}, "ok");
+}
+
+struct MapEntry {
+  std::string_view perms;
+  std::string_view path;
+};
+
+// "start-end perms offset dev inode   path": the path may contain spaces and
+// is empty for anonymous memory. Lines that do not have the five leading
+// fields are not map entries.
+std::optional<MapEntry> parse_map_line(std::string_view line) {
+  std::size_t pos = 0;
+  std::string_view fields[5];
+  for (auto &field : fields) {
+    while (pos < line.size() && line[pos] == ' ') {
+      ++pos;
+    }
+    const auto end = line.find(' ', pos);
+    if (pos >= line.size() || end == std::string_view::npos) {
+      return std::nullopt;
+    }
+    field = line.substr(pos, end - pos);
+    pos = end;
+  }
+  while (pos < line.size() && line[pos] == ' ') {
+    ++pos;
+  }
+  return MapEntry{fields[1], line.substr(pos)};
 }
 
 // libffi legitimately backs closure trampolines with a memfd.
@@ -297,6 +340,8 @@ AwsCliVerifier::Options AwsCliVerifier::default_options() {
       "/usr/bin/aws",
   };
   options.pin_file = "/etc/methuselah/aws-cli.sha256";
+  options.ptrace_waiver_file = "/etc/methuselah/allow-weak-ptrace";
+  options.anonymous_exec_waiver_file = "/etc/methuselah/allow-anonymous-exec";
   if (const auto service = account_uid(kServiceAccount);
       service && *service != 0 && *service != ::geteuid()) {
     options.install_owners.push_back(*service);
@@ -325,6 +370,11 @@ AwsCliVerifier::forbidden_environment(std::string_view environment,
       // preserves the original in LD_LIBRARY_PATH_ORIG, which stays forbidden.
       seen_library_path = true;
       continue;
+    }
+    if (starts_with(name, "AWS_") &&
+        std::find(kAllowedAwsEnvironment.begin(), kAllowedAwsEnvironment.end(),
+                  name) == kAllowedAwsEnvironment.end()) {
+      return std::string(name);
     }
     for (const auto pattern : kForbiddenEnvironment) {
       if (name_matches(name, pattern)) {
@@ -396,41 +446,134 @@ AwsCliVerifier::executable_mapping_paths(std::string_view maps) {
   std::set<std::string> unique;
   while (!maps.empty()) {
     const auto nl = maps.find('\n');
-    std::string_view line = maps.substr(0, nl);
+    const std::string_view line = maps.substr(0, nl);
     maps =
         nl == std::string_view::npos ? std::string_view{} : maps.substr(nl + 1);
 
-    // "start-end perms offset dev inode   path": the path may contain spaces.
-    std::size_t pos = 0;
-    std::string_view fields[5];
-    bool complete = true;
-    for (auto &field : fields) {
-      while (pos < line.size() && line[pos] == ' ') {
-        ++pos;
-      }
-      const auto end = line.find(' ', pos);
-      if (pos >= line.size() || end == std::string_view::npos) {
-        complete = false;
-        break;
-      }
-      field = line.substr(pos, end - pos);
-      pos = end;
-    }
-    if (!complete) {
+    const auto entry = parse_map_line(line);
+    if (!entry) {
       continue;
     }
-    while (pos < line.size() && line[pos] == ' ') {
-      ++pos;
-    }
-    const std::string_view path = line.substr(pos);
-    const std::string_view perms = fields[1];
-    if (perms.size() < 3 || perms[2] != 'x' || path.empty() ||
-        path.front() != '/') {
+    if (entry->perms.size() < 3 || entry->perms[2] != 'x' ||
+        entry->path.empty() || entry->path.front() != '/') {
       continue; // not executable, anonymous, or [vdso]/[stack]-style
     }
-    unique.emplace(path);
+    unique.emplace(entry->path);
   }
   return {unique.begin(), unique.end()};
+}
+
+AwsCliVerifier::UnsafeMapping
+AwsCliVerifier::unsafe_mapping(std::string_view maps) {
+  while (!maps.empty()) {
+    const auto nl = maps.find('\n');
+    const std::string_view line = maps.substr(0, nl);
+    maps =
+        nl == std::string_view::npos ? std::string_view{} : maps.substr(nl + 1);
+
+    const auto entry = parse_map_line(line);
+    if (!entry || entry->perms.size() < 3 || entry->perms[2] != 'x' ||
+        allowed_special_mapping(entry->path) || entry->path == "[vdso]" ||
+        entry->path == "[vsyscall]") {
+      continue;
+    }
+    const bool anonymous = entry->path.empty() || entry->path.front() != '/';
+    if (entry->perms[1] == 'w') {
+      return anonymous ? UnsafeMapping::anonymous_writable_executable
+                       : UnsafeMapping::file_writable_executable;
+    }
+    if (anonymous) {
+      return UnsafeMapping::anonymous_executable;
+    }
+  }
+  return UnsafeMapping::none;
+}
+
+std::optional<int> AwsCliVerifier::parse_ptrace_scope(std::string_view text) {
+  while (!text.empty() && (text.back() == '\n' || text.back() == ' ')) {
+    text.remove_suffix(1);
+  }
+  int value = 0;
+  const auto [end, ec] =
+      std::from_chars(text.data(), text.data() + text.size(), value);
+  if (text.empty() || ec != std::errc{} || end != text.data() + text.size() ||
+      value < 0 || value > 3) {
+    return std::nullopt;
+  }
+  return value;
+}
+
+SecurityVerdict AwsCliVerifier::verify_ptrace_policy() const {
+  if (options_.min_ptrace_scope <= 0) {
+    return verdict(std::errc{}, "ok");
+  }
+  if (!options_.ptrace_waiver_file.empty() &&
+      Security::trusted_file(options_.ptrace_waiver_file)) {
+    SPDLOG_TRACE("aws ptrace_scope requirement waived by root-owned file");
+    return verdict(std::errc{}, "ok");
+  }
+  std::ifstream file(options_.ptrace_scope_file);
+  std::string text;
+  if (!file || !std::getline(file, text)) {
+    return verdict(std::errc::permission_denied,
+                   "Yama ptrace_scope is unavailable (see docs/aws.md)");
+  }
+  const auto scope = parse_ptrace_scope(text);
+  if (!scope) {
+    return verdict(std::errc::permission_denied,
+                   "Yama ptrace_scope is unreadable (see docs/aws.md)");
+  }
+  if (*scope < options_.min_ptrace_scope) {
+    return verdict(std::errc::permission_denied,
+                   "Yama ptrace_scope is too low: a same-user parent could "
+                   "attach to the AWS CLI (see docs/aws.md)");
+  }
+  return verdict(std::errc{}, "ok");
+}
+
+SecurityVerdict AwsCliVerifier::verify_output_channel(pid_t caller, int fd) {
+  struct stat out{};
+  if (::fstat(fd, &out) != 0 || !S_ISFIFO(out.st_mode)) {
+    return verdict(std::errc::permission_denied,
+                   "stdout must be a pipe from the AWS CLI");
+  }
+  std::error_code ec;
+  std::filesystem::directory_iterator it(proc_link(caller, "fd"), ec);
+  if (ec) {
+    return verdict(std::errc::io_error,
+                   "cannot inspect caller file descriptors");
+  }
+  for (const std::filesystem::directory_iterator end; it != end;
+       it.increment(ec)) {
+    if (ec) {
+      break;
+    }
+    struct stat peer{};
+    if (::stat(it->path().c_str(), &peer) != 0 || !S_ISFIFO(peer.st_mode) ||
+        !same_file(peer, out)) {
+      continue;
+    }
+    // The caller must hold the read side, not just any end of the pipe.
+    const auto info = ProcessInfo::readProc(
+        caller, ("fdinfo/" + it->path().filename().string()).c_str(), 4096);
+    if (!info) {
+      continue;
+    }
+    const auto flags = info->find("flags:");
+    if (flags == std::string::npos) {
+      continue;
+    }
+    const long mode = std::strtol(info->c_str() + flags + 6, nullptr, 8);
+    if ((mode & O_ACCMODE) != O_WRONLY) {
+      return verdict(std::errc{}, "ok");
+    }
+  }
+  if (ec) {
+    return verdict(std::errc::io_error,
+                   "cannot inspect caller file descriptors");
+  }
+  return verdict(std::errc::permission_denied,
+                 "stdout is not a pipe read by the AWS CLI");
 }
 
 std::optional<std::vector<std::string>>
@@ -508,6 +651,9 @@ std::optional<std::string> AwsCliVerifier::sha256_hex(int fd) {
 SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
   if (pid <= 1) {
     return verdict(std::errc::io_error, "no AWS CLI parent process");
+  }
+  if (const auto ptrace = verify_ptrace_policy(); !ptrace.passed()) {
+    return ptrace;
   }
 
   // Snapshot only: this check cannot prevent a later ptrace attachment.
@@ -662,6 +808,25 @@ SecurityVerdict AwsCliVerifier::verify(pid_t pid) const {
   const auto maps = ProcessInfo::readProc(pid, "maps", 16U << 20);
   if (!maps) {
     return verdict(std::errc::io_error, "cannot read caller memory map");
+  }
+  const auto mapping = unsafe_mapping(*maps);
+  if (mapping == UnsafeMapping::file_writable_executable) {
+    return verdict(std::errc::permission_denied,
+                   "AWS CLI has a writable executable file mapping");
+  }
+  if (mapping != UnsafeMapping::none) {
+    if (!options_.anonymous_exec_waiver_file.empty() &&
+        Security::trusted_file(options_.anonymous_exec_waiver_file)) {
+      SPDLOG_TRACE("aws anonymous executable memory waived by root-owned file");
+    } else if (mapping == UnsafeMapping::anonymous_writable_executable) {
+      return verdict(
+          std::errc::permission_denied,
+          "AWS CLI has writable executable memory (see docs/aws.md)");
+    } else {
+      return verdict(
+          std::errc::permission_denied,
+          "AWS CLI has anonymous executable memory (see docs/aws.md)");
+    }
   }
   for (const auto &path : executable_mapping_paths(*maps)) {
     if (allowed_special_mapping(path)) {

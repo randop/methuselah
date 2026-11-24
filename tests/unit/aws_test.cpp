@@ -6,6 +6,8 @@
 
 #include "methuselah/aws_cli_verifier.hpp"
 #include "methuselah/aws_credentials.hpp"
+#include "methuselah/aws_signers.hpp"
+#include "methuselah/process_info.hpp"
 #include "methuselah/security.hpp"
 
 #include <sodium.h>
@@ -168,14 +170,29 @@ void test_environment() {
   CHECK(!V::forbidden_environment(clean).has_value());
   CHECK(!V::forbidden_environment("").has_value());
 
-  for (const char *bad :
-       {"LD_PRELOAD=/tmp/x.so", "LD_LIBRARY_PATH=/tmp", "LD_AUDIT=/tmp/a.so",
-        "PYTHONPATH=/tmp", "PYTHONSTARTUP=/tmp/s.py", "MALLOC_PERTURB_=1",
-        "AWS_ENDPOINT_URL=https://evil", "AWS_ENDPOINT_URL_S3=https://evil",
-        "AWS_CA_BUNDLE=/tmp/ca.pem", "SSL_CERT_FILE=/tmp/ca.pem",
-        "REQUESTS_CA_BUNDLE=/tmp/ca.pem", "AWS_CONFIG_FILE=/tmp/cfg",
-        "GCONV_PATH=/tmp", "AWS_CLI_AUTO_PROMPT=on",
-        "AWS_CLI_AUTO_PROMPT=ON-PARTIAL"}) {
+  for (const char *bad : {"LD_PRELOAD=/tmp/x.so",
+                          "LD_LIBRARY_PATH=/tmp",
+                          "LD_AUDIT=/tmp/a.so",
+                          "PYTHONPATH=/tmp",
+                          "PYTHONSTARTUP=/tmp/s.py",
+                          "MALLOC_PERTURB_=1",
+                          "AWS_ENDPOINT_URL=https://evil",
+                          "AWS_ENDPOINT_URL_S3=https://evil",
+                          "AWS_CA_BUNDLE=/tmp/ca.pem",
+                          "SSL_CERT_FILE=/tmp/ca.pem",
+                          "REQUESTS_CA_BUNDLE=/tmp/ca.pem",
+                          "AWS_CONFIG_FILE=/tmp/cfg",
+                          "GCONV_PATH=/tmp",
+                          "AWS_CLI_AUTO_PROMPT=on",
+                          "AWS_CLI_AUTO_PROMPT=ON-PARTIAL",
+                          "OPENSSL_CONF=/tmp/o.cnf",
+                          "OPENSSL_MODULES=/tmp/m",
+                          "OPENSSL_ENGINES=/tmp/e",
+                          "AWS_ACCESS_KEY_ID=AKIAEXAMPLE",
+                          "AWS_STS_REGIONAL_ENDPOINTS=legacy",
+                          "AWS_EC2_METADATA_SERVICE_ENDPOINT=http://evil",
+                          "AWS_ROLE_ARN=arn:aws:iam::1:role/x",
+                          "AWS_USE_FIPS_ENDPOINT=true"}) {
     const std::string env = clean + bad + '\0';
     const auto hit = V::forbidden_environment(env);
     CHECK(hit.has_value());
@@ -202,6 +219,13 @@ void test_environment() {
                                  bundle) == "AWS_DATA_PATH");
 
   CHECK(!V::forbidden_environment(clean + "AWS_CLI_AUTO_PROMPT=off"));
+  // The AWS_* namespace is deny-by-default; only inert settings pass.
+  for (const char *fine :
+       {"AWS_REGION=eu-west-1", "AWS_DEFAULT_REGION=us-east-1",
+        "AWS_PAGER=", "AWS_DEFAULT_OUTPUT=json", "AWS_MAX_ATTEMPTS=3",
+        "AWS_RETRY_MODE=standard", "AWS_DEFAULT_PROFILE=dev"}) {
+    CHECK(!V::forbidden_environment(clean + fine + '\0').has_value());
+  }
 
   // Names must match; look-alikes and values must not.
   CHECK(!V::forbidden_environment(std::string("MY_LD_PRELOAD=1") + '\0')
@@ -521,6 +545,7 @@ void test_service_install() {
   }
 
   AwsCliVerifier::Options options;
+  options.min_ptrace_scope = 0;
   options.candidates = {copy};
   options.required_name = "sh";
   options.install_owners = policy.owners;
@@ -579,6 +604,193 @@ void test_verdict() {
   }
 }
 
+std::string iso_utc(std::time_t when) {
+  struct tm parts{};
+  ::gmtime_r(&when, &parts);
+  char out[32];
+  std::strftime(out, sizeof(out), "%Y-%m-%dT%H:%M:%SZ", &parts);
+  return out;
+}
+
+void test_expiry_window() {
+  const std::string token = std::string("session_token=") + kToken + "\n";
+  const auto text = [&](std::time_t offset) {
+    return creds_text(token + "expiration=" + iso_utc(kNow + offset) + "\n");
+  };
+  CHECK(parse_ok(text(60 * 60)));
+  CHECK(parse_ok(text(15 * 60 + 1)));
+  // Inside botocore's refresh window the CLI would re-run the helper (and the
+  // passphrase prompt) on every call.
+  CHECK(!parse_ok(text(15 * 60 - 1)));
+  CHECK(!parse_ok(text(60)));
+  CHECK(parse_error(text(60)).find("15 minutes") != std::string::npos);
+  CHECK(parse_error(text(-60)).find("expired") != std::string::npos);
+}
+
+void test_unsafe_mappings() {
+  using V = AwsCliVerifier;
+  const std::string file_exec =
+      "55d0-55d1 r-xp 00000000 08:01 1234  /usr/local/aws-cli/v2/current/dist/"
+      "aws\n";
+  const std::string file_data =
+      "55d1-55d2 rw-p 00001000 08:01 1234  /usr/local/aws-cli/v2/current/dist/"
+      "aws\n";
+  const std::string anon_data = "7f00-7f10 rw-p 00000000 00:00 0 \n";
+  const std::string special =
+      "7ffc-7ffd r-xp 00000000 00:00 0                  [vdso]\n"
+      "ff60-ff61 --xp 00000000 00:00 0                  [vsyscall]\n"
+      "7f20-7f21 r-xs 00000000 00:01 77  /memfd:libffi (deleted)\n";
+  CHECK(V::unsafe_mapping("") == V::UnsafeMapping::none);
+  CHECK(V::unsafe_mapping("garbage\n\n") == V::UnsafeMapping::none);
+  CHECK(V::unsafe_mapping(file_exec + file_data + anon_data + special) ==
+        V::UnsafeMapping::none);
+  CHECK(V::unsafe_mapping(file_exec + "7f30-7f31 rwxp 00000000 00:00 0 \n") ==
+        V::UnsafeMapping::anonymous_writable_executable);
+  CHECK(V::unsafe_mapping("7f30-7f31 rwxp 00000000 08:01 9  /usr/lib/x.so\n") ==
+        V::UnsafeMapping::file_writable_executable);
+  CHECK(V::unsafe_mapping(file_exec + "7f40-7f41 r-xp 00000000 00:00 0 \n") ==
+        V::UnsafeMapping::anonymous_executable);
+  CHECK(V::unsafe_mapping("7f40-7f41 r-xp 00000000 00:00 0   [anon:evil]\n") ==
+        V::UnsafeMapping::anonymous_executable);
+  CHECK(V::unsafe_mapping("7f40-7f41 r-xp 00000000 00:01 5  /memfd:evil "
+                          "(deleted)\n") == V::UnsafeMapping::none);
+}
+
+void test_ptrace_scope_parse() {
+  using V = AwsCliVerifier;
+  CHECK(V::parse_ptrace_scope("0\n") == 0);
+  CHECK(V::parse_ptrace_scope("1") == 1);
+  CHECK(V::parse_ptrace_scope("2\n") == 2);
+  CHECK(V::parse_ptrace_scope("3\n") == 3);
+  for (const char *bad : {"", "\n", "4", "-1", "two", "2x", "2 2", "02x"}) {
+    CHECK(!V::parse_ptrace_scope(bad).has_value());
+  }
+}
+
+void test_signer_policy() {
+  using S = AwsSigners;
+  const std::string fpr40(40, 'a');
+  const std::string fpr64(64, 'B');
+  const auto entries = S::parse("# who signs what\n\nprod " + fpr40 +
+                                "\n  dev\t" + fpr64 + "  \n");
+  CHECK(entries.has_value());
+  if (entries) {
+    CHECK(entries->size() == 2);
+    const auto prod = S::find(*entries, "prod");
+    CHECK(prod.passed() && prod.required());
+    CHECK(prod.fingerprint == std::string(40, 'A')); // normalised
+    CHECK(S::find(*entries, "dev").fingerprint == fpr64);
+    // An unlisted profile is simply not enforced.
+    const auto other = S::find(*entries, "stage");
+    CHECK(other.passed() && !other.required());
+  }
+  CHECK(S::parse("").has_value() && S::parse("")->empty());
+  CHECK(!S::parse("prod\n"));                            // no fingerprint
+  CHECK(!S::parse("prod " + std::string(39, 'a')));      // wrong length
+  CHECK(!S::parse("prod " + std::string(40, 'g')));      // not hex
+  CHECK(!S::parse("prod " + fpr40 + " extra"));          // trailing junk
+  CHECK(!S::parse("prod " + fpr40 + "\nprod " + fpr40)); // duplicate
+
+  // An absent policy file enforces nothing; one that cannot be trusted fails
+  // closed rather than silently dropping the requirement.
+  const auto none = S::load("/nonexistent/methuselah/aws-signers", "prod");
+  CHECK(none.passed() && !none.required());
+  const std::string path =
+      "/tmp/methuselah-signers-test-" + std::to_string(::getpid());
+  {
+    std::ofstream out(path);
+    out << "prod " << fpr40 << "\n";
+  }
+  const auto untrusted = S::load(path, "prod");
+  CHECK(untrusted.result == std::errc::io_error && !untrusted.required());
+  ::unlink(path.c_str());
+}
+
+void test_output_channel() {
+  using V = AwsCliVerifier;
+  int fds[2];
+  CHECK(::pipe2(fds, O_CLOEXEC) == 0);
+  // This process holds both ends, so it counts as the reader.
+  CHECK(V::verify_output_channel(::getpid(), fds[1]).passed());
+
+  // Not a pipe at all.
+  const int null = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
+  CHECK(V::verify_output_channel(::getpid(), null).result ==
+        std::errc::permission_denied);
+  ::close(null);
+
+  // A child that does not hold the pipe cannot be the reader.
+  if (const auto shell = Security::trusted_executable("/bin/sh")) {
+    Child other =
+        spawn(shell->string(), {"sh", "-c", "sleep 10; true"}, {"HOME=/"});
+    CHECK(wait_for_exec(other.pid, shell->string()));
+    CHECK(V::verify_output_channel(other.pid, fds[1]).result ==
+          std::errc::permission_denied);
+  }
+
+  // Holding only the write end is not reading it.
+  ::close(fds[0]);
+  CHECK(V::verify_output_channel(::getpid(), fds[1]).result ==
+        std::errc::permission_denied);
+  ::close(fds[1]);
+}
+
+// A real process whose libffi closures live in anonymous rwx memory: strict by
+// default, accepted only with a root-owned waiver.
+void test_anonymous_exec_waiver() {
+  const auto python = Security::trusted_executable("/usr/bin/python3");
+  if (!python) {
+    std::printf("SKIP anonymous exec: no root-owned /usr/bin/python3\n");
+    return;
+  }
+  AwsCliVerifier::Options options;
+  options.min_ptrace_scope = 0;
+  options.candidates = {"/usr/bin/python3"};
+  options.required_name = python->filename().string();
+  options.pin_file = "/nonexistent/methuselah/pin";
+
+  Child child = spawn(python->string(),
+                      {"python3", "-c",
+                       "import ctypes, time\n"
+                       "cb = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int)"
+                       "(lambda x: x)\n"
+                       "time.sleep(10)"},
+                      {"HOME=/"});
+  CHECK(wait_for_exec(child.pid, python->string()));
+  bool anonymous = false;
+  for (int i = 0; i < 60 && !anonymous; ++i) {
+    const auto maps = ProcessInfo::readProc(child.pid, "maps", 16U << 20);
+    anonymous =
+        maps &&
+        AwsCliVerifier::unsafe_mapping(*maps) ==
+            AwsCliVerifier::UnsafeMapping::anonymous_writable_executable;
+    if (!anonymous) {
+      ::usleep(50'000);
+    }
+  }
+  if (!anonymous) {
+    std::printf("SKIP anonymous exec: libffi here uses no anonymous rwx\n");
+    return;
+  }
+  const auto strict = AwsCliVerifier(options).verify(child.pid);
+  CHECK(strict.result == std::errc::permission_denied);
+  CHECK(std::string(strict.reason).find("executable memory") !=
+        std::string::npos);
+  if (Security::trusted_file("/etc/passwd")) {
+    options.anonymous_exec_waiver_file = "/etc/passwd"; // stands in for it
+    const auto waived = AwsCliVerifier(options).verify(child.pid);
+    if (!waived.passed()) {
+      std::fprintf(stderr, "  unexpected verdict: %.*s\n",
+                   static_cast<int>(waived.reason.size()),
+                   waived.reason.data());
+    }
+    CHECK(waived.passed());
+  }
+  options.anonymous_exec_waiver_file = "/tmp"; // not a root-owned file
+  CHECK(AwsCliVerifier(options).verify(child.pid).result ==
+        std::errc::permission_denied);
+}
+
 void test_verify() {
   // Stand a system shell in for `aws`: same checks, real kernel state.
   const auto shell = Security::trusted_executable("/bin/sh");
@@ -587,6 +799,7 @@ void test_verify() {
     return;
   }
   AwsCliVerifier::Options options;
+  options.min_ptrace_scope = 0;
   options.candidates = {"/bin/sh"};
   options.required_name = shell->filename().string();
   const AwsCliVerifier verifier(options);
@@ -660,8 +873,53 @@ void test_verify() {
     ::rmdir(dir);
   }
   {
+    // Yama must stop a same-user parent from attaching to the AWS CLI.
+    const std::string scope_file =
+        "/tmp/methuselah-ptrace-test-" + std::to_string(::getpid());
+    const auto write_scope = [&](const char *text) {
+      std::ofstream out(scope_file, std::ios::trunc);
+      out << text;
+    };
+    AwsCliVerifier::Options strict = options;
+    strict.min_ptrace_scope = 2;
+    strict.ptrace_scope_file = scope_file;
+    Child ok = spawn(shell->string(), sh_args, clean_env);
+    CHECK(wait_for_exec(ok.pid, shell->string()));
+
+    write_scope("1\n");
+    CHECK(AwsCliVerifier(strict).verify(ok.pid).result ==
+          std::errc::permission_denied);
+    write_scope("0\n");
+    CHECK(AwsCliVerifier(strict).verify(ok.pid).result ==
+          std::errc::permission_denied);
+    write_scope("banana\n");
+    CHECK(AwsCliVerifier(strict).verify(ok.pid).result ==
+          std::errc::permission_denied);
+    write_scope("2\n");
+    CHECK(AwsCliVerifier(strict).verify(ok.pid).passed());
+    write_scope("3\n");
+    CHECK(AwsCliVerifier(strict).verify(ok.pid).passed());
+
+    // No Yama at all is refused too, unless a root-owned waiver exists.
+    ::unlink(scope_file.c_str());
+    CHECK(AwsCliVerifier(strict).verify(ok.pid).result ==
+          std::errc::permission_denied);
+    strict.ptrace_waiver_file = "/etc/methuselah-test-no-such-waiver";
+    CHECK(AwsCliVerifier(strict).verify(ok.pid).result ==
+          std::errc::permission_denied);
+    if (Security::trusted_file("/etc/passwd")) {
+      strict.ptrace_waiver_file = "/etc/passwd"; // stands in for the waiver
+      CHECK(AwsCliVerifier(strict).verify(ok.pid).passed());
+    }
+    // A waiver the user could have written does not count.
+    strict.ptrace_waiver_file = "/tmp";
+    CHECK(AwsCliVerifier(strict).verify(ok.pid).result ==
+          std::errc::permission_denied);
+  }
+  {
     // No usable installation at all must fault, not pass or silently fail.
     AwsCliVerifier::Options none;
+    none.min_ptrace_scope = 0;
     none.candidates = {"/nonexistent/aws"};
     Child ok = spawn(shell->string(), sh_args, clean_env);
     CHECK(wait_for_exec(ok.pid, shell->string()));
@@ -681,10 +939,15 @@ int main() {
     return EXIT_FAILURE;
   }
   test_credentials();
+  test_expiry_window();
   test_environment();
   test_cli_config();
   test_arguments();
   test_maps();
+  test_unsafe_mappings();
+  test_ptrace_scope_parse();
+  test_signer_policy();
+  test_output_channel();
   test_trusted_file();
   test_trust_policy();
   test_aws_defaults();
@@ -692,6 +955,7 @@ int main() {
   test_verdict();
   test_service_install();
   test_verify();
+  test_anonymous_exec_waiver();
 
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

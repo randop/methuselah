@@ -16,9 +16,20 @@ BIN_DIR=/usr/local/bin
 PIN_DIR=/etc/methuselah
 PIN_FILE=$PIN_DIR/aws-cli.sha256
 
+# Primary key AWS signs its CLI v2 installers with (see "Install or update to
+# the latest version of the AWS CLI" in the AWS CLI User Guide). Compare it
+# with the fingerprint published there before relying on this script.
+AWS_CLI_KEY_FPR=FB5DB77FD5C118B80511ADA8A6310ACC4672475C
+
 die() {
   printf 'ERROR: %s\n' "$*" >&2
   exit 1
+}
+
+# Run a command as the service account, which owns every file the installer
+# touches. Nothing the calling user can modify is ever executed as it.
+as_service() {
+  sudo -u "$SERVICE_USER" -g "$SERVICE_GROUP" "$@"
 }
 
 member_of() {
@@ -34,7 +45,7 @@ process_in_group() {
 [ "$(id -un)" != "$SERVICE_USER" ] ||
   die "run this script as the account that will use AWS, not $SERVICE_USER"
 
-for tool in curl unzip sha256sum getent sudo id install; do
+for tool in curl unzip sha256sum getent sudo id install gpg awk; do
   command -v "$tool" >/dev/null 2>&1 ||
     die "required command not found: $tool"
 done
@@ -93,9 +104,25 @@ sudo install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 \
 # Modify the contents of the install tree only as the service account.
 sudo -u "$SERVICE_USER" -g "$SERVICE_GROUP" mkdir -p -- "$INSTALL_ROOT/bin"
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/methuselah-aws.XXXXXX")
+# The public key must already be in the calling user's keyring, imported from
+# AWS's documentation. Exporting it by the pinned fingerprint guarantees that
+# only that key is used to judge the download.
+if [ -z "$(gpg --batch --export "$AWS_CLI_KEY_FPR" 2>/dev/null | head -c 1)" ]; then
+  die "AWS CLI public key $AWS_CLI_KEY_FPR is not in your GnuPG keyring.
+Import it from the AWS CLI installation guide, confirm the fingerprint there,
+then run this script again."
+fi
+
+# Everything is downloaded, verified and run inside a private directory owned
+# by the service account (mode 0700), so no other process of the calling user
+# can swap files between verification and installation.
+work=$(as_service mktemp -d "/var/tmp/methuselah-aws.XXXXXX")
+case "$work" in
+/var/tmp/methuselah-aws.*) ;;
+*) die "unexpected work directory: $work" ;;
+esac
 cleanup() {
-  rm -rf "$tmp"
+  as_service rm -rf --one-file-system -- "$work"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -105,22 +132,37 @@ trap 'exit 129' HUP
 archive="awscli-exe-linux-$aws_arch.zip"
 url="https://awscli.amazonaws.com/$archive"
 printf 'Downloading AWS CLI v2 (%s)\n' "$aws_arch"
-curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 \
-  -o "$tmp/$archive" "$url"
-unzip -tq "$tmp/$archive" >/dev/null
-unzip -q "$tmp/$archive" -d "$tmp"
+as_service curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 \
+  -o "$work/$archive" "$url"
+as_service curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 \
+  -o "$work/$archive.sig" "$url.sig"
 
-# The installer runs as the service account, so it must be able to read the
-# extracted tree.
-chmod 0755 "$tmp"
-chmod -R a+rX "$tmp/aws"
+printf 'Verifying the signature against %s\n' "$AWS_CLI_KEY_FPR"
+as_service install -d -m 0700 "$work/gnupg"
+gpg --batch --export "$AWS_CLI_KEY_FPR" |
+  as_service tee "$work/aws-cli.pub" >/dev/null
+as_service gpg --homedir "$work/gnupg" --batch --quiet \
+  --import "$work/aws-cli.pub" 2>/dev/null ||
+  die "could not import the AWS CLI public key"
+status=$(as_service gpg --homedir "$work/gnupg" --batch --status-fd 1 \
+  --verify "$work/$archive.sig" "$work/$archive" 2>/dev/null) ||
+  die "AWS CLI signature verification failed; refusing to install"
+# VALIDSIG's last field is the primary key fingerprint of the signer.
+printf '%s\n' "$status" |
+  awk -v fpr="$AWS_CLI_KEY_FPR" \
+    '$1 == "[GNUPG:]" && $2 == "VALIDSIG" && $NF == fpr { ok = 1 }
+     END { exit !ok }' ||
+  die "AWS CLI archive was not signed by $AWS_CLI_KEY_FPR"
+
+as_service unzip -tq "$work/$archive" >/dev/null
+as_service unzip -q "$work/$archive" -d "$work"
 
 install_args=(-i "$INSTALL_ROOT" -b "$INSTALL_ROOT/bin")
 if [ -L "$INSTALL_ROOT/v2/current" ]; then
   install_args+=(--update)
 fi
 printf 'Installing AWS CLI v2 as %s\n' "$SERVICE_USER"
-sudo -u "$SERVICE_USER" -g "$SERVICE_GROUP" "$tmp/aws/install" "${install_args[@]}"
+as_service "$work/aws/install" "${install_args[@]}"
 
 sudo -u "$SERVICE_USER" -g "$SERVICE_GROUP" chmod -R u=rwX,g=rX,o= "$INSTALL_ROOT"
 sudo -u "$SERVICE_USER" -g "$SERVICE_GROUP" test -x "$INSTALL_ROOT/v2/current/dist/aws" ||

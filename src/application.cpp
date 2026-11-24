@@ -2,7 +2,9 @@
 
 #include "methuselah/application.hpp"
 
+#include "methuselah/aws_cli_verifier.hpp"
 #include "methuselah/aws_credentials.hpp"
+#include "methuselah/aws_signers.hpp"
 #include "methuselah/config.hpp"
 #include "methuselah/git_credentials.hpp"
 #include "methuselah/gpg_decrypt.hpp"
@@ -21,6 +23,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -281,15 +284,24 @@ std::optional<std::filesystem::path> aws_gpg_path(const std::string &profile) {
   return resolve_path(*gpg_file, false);
 }
 
+// Longest a passphrase prompt may stay open in total. Waiting callers give up
+// after InstanceLock's longer limit, so an abandoned dialog cannot wedge them.
+constexpr int kUnlockBudgetSeconds = 120;
+
 // Reuses an unlocked gpg-agent when possible, otherwise asks for the
 // passphrase. Unlike the git flow, cancelling is a failure: the CLI must not
 // see an empty, "successful" reply.
 std::optional<DecryptResult>
 unlock_credentials(const GpgDecryptor &decryptor, int fd,
-                   const std::filesystem::path &file) {
-  auto remembered = decryptor.decrypt_fd(fd, SecureString{});
+                   const std::filesystem::path &file,
+                   std::string_view required_signer) {
+  auto remembered = decryptor.decrypt_fd(fd, SecureString{}, required_signer);
   if (remembered.ok()) {
     return remembered;
+  }
+  if (remembered.error() == GpgDecryptor::kNotSignedError) {
+    std::cerr << "ERROR: " << file << ": " << remembered.error() << std::endl;
+    return std::nullopt;
   }
 
   UiSession::install_log_callback();
@@ -301,19 +313,26 @@ unlock_credentials(const GpgDecryptor &decryptor, int fd,
   PromptOptions options;
   options.title = "aws credentials";
   options.message = kDefaultMessage;
+  options.timeout_seconds = kUnlockBudgetSeconds;
 
-  while (!SignalGuard::received()) {
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::seconds(kUnlockBudgetSeconds);
+  while (!SignalGuard::received() &&
+         std::chrono::steady_clock::now() < deadline) {
     std::optional<SecureString> password = ui.prompt_password(options);
     if (!password) {
       break;
     }
-    auto result = decryptor.decrypt_fd(fd, *password);
+    auto result = decryptor.decrypt_fd(fd, *password, required_signer);
     secure_clear(*password);
     if (result.ok()) {
       return result;
     }
     std::cerr << "ERROR: credential decryption issue on " << file << ": "
               << result.error() << std::endl;
+    if (result.error() == GpgDecryptor::kNotSignedError) {
+      break;
+    }
   }
   return std::nullopt;
 }
@@ -325,12 +344,16 @@ int run_aws_flow(const std::string &profile, pid_t caller,
     return EXIT_FAILURE;
   }
 
-  // credential_process output must go to the CLI's pipe, never a terminal or
-  // a file where it would linger in scrollback or on disk.
-  struct stat out{};
-  if (::fstat(STDOUT_FILENO, &out) != 0 ||
-      !(S_ISFIFO(out.st_mode) || S_ISSOCK(out.st_mode))) {
-    std::cerr << "Error: stdout must be a pipe from the AWS CLI" << std::endl;
+  // credential_process output must go to a pipe the verified CLI reads, never
+  // a terminal, a file, or a pipe some other process holds the end of.
+  if (reject_unverified("aws", AwsCliVerifier::verify_output_channel(
+                                   caller, STDOUT_FILENO))) {
+    return EXIT_FAILURE;
+  }
+
+  const auto signer = AwsSigners::load(AwsSigners::default_file(), profile);
+  if (!signer.passed()) {
+    std::cerr << "Error: " << signer.reason << std::endl;
     return EXIT_FAILURE;
   }
 
@@ -349,7 +372,8 @@ int run_aws_flow(const std::string &profile, pid_t caller,
   }
 
   GpgDecryptor decryptor;
-  auto unlocked = unlock_credentials(decryptor, file.get(), *gpg_path);
+  auto unlocked =
+      unlock_credentials(decryptor, file.get(), *gpg_path, signer.fingerprint);
   if (!unlocked) {
     std::cerr << "Error: could not unlock aws credentials for profile "
               << profile << std::endl;
@@ -370,7 +394,9 @@ int run_aws_flow(const std::string &profile, pid_t caller,
               << std::endl;
     return EXIT_FAILURE;
   }
-  if (reject_unverified("aws", security.verify_aws(caller))) {
+  if (reject_unverified("aws", security.verify_aws(caller)) ||
+      reject_unverified("aws", AwsCliVerifier::verify_output_channel(
+                                   caller, STDOUT_FILENO))) {
     return EXIT_FAILURE;
   }
   if (SignalGuard::received()) {
@@ -407,7 +433,13 @@ int Application::run(int argc, char **argv) {
   InstanceLock lock(macro == Macro::Aws ? InstanceLock::Mode::wait
                                         : InstanceLock::Mode::focus_existing);
   if (!lock.acquired()) {
-    return macro == Macro::Aws ? EXIT_FAILURE : EXIT_SUCCESS;
+    if (macro == Macro::Aws) {
+      std::cerr << "Error: could not take the credential_process lock "
+                   "(another request is still waiting for a passphrase)"
+                << std::endl;
+      return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
   }
 
   if (macro == Macro::Git && (argc < 3 || std::strcmp(argv[2], "get") != 0)) {

@@ -26,6 +26,14 @@ changes, and adds your account to `users`. Sign out and back in after the
 first run so your shell picks up that group, then check `aws --version`.
 Run the script again to update an existing install and refresh the pin.
 
+The installer checks the download before anything is installed. It needs
+`gpg` and AWS's CLI signing key (fingerprint `FB5D B77F D5C1 18B8 0511  ADA8
+A631 0ACC 4672 475C`, compare it with the AWS CLI installation guide) in
+your keyring; import the key from that guide first. The archive and its
+detached signature are downloaded, verified, unpacked, and run inside a
+private `0700` directory owned by `methuselah`, so no other process of yours
+can alter files between verification and installation.
+
 ## Setup
 
 The steps below use `gpg` directly. If you use `pass` and prefer to have the
@@ -74,8 +82,10 @@ rest) work. Unknown keys and duplicates are rejected.
 `secret_access_key` is 20 to 128 characters from `A–Z`, `a–z`, `0–9`, `+`,
 `/`, and `=`. `session_token`, when present, is 16 to 4096 characters from
 that set plus `_`, `-`, and `.`, and it requires `expiration`. `expiration`
-is UTC `YYYY-MM-DDTHH:MM:SSZ` and must still be in the future when the file
-is decrypted. Error text never includes those values.
+is UTC `YYYY-MM-DDTHH:MM:SSZ` and must be more than 15 minutes away when the
+file is decrypted: the CLI refreshes temporary credentials inside that
+window and would otherwise call the helper, and prompt, on every request.
+Error text never includes those values.
 
 ### 2. Map profiles in Methuselah
 
@@ -238,10 +248,13 @@ configuration out of its `.aws/config`. Leave `LD_LIBRARY_PATH` unset: the
 bundle copies an inherited value to `LD_LIBRARY_PATH_ORIG`, and the helper
 refuses that variable.
 
-Credentials are written only to a pipe or a socket, which is how
-`credential_process` invokes the helper. A terminal or a regular file is
-refused. Cancelling the passphrase prompt fails the request. Concurrent
-calls wait for one another; if that lock cannot be taken, the request fails.
+Credentials are written only to a pipe whose read end the verified AWS CLI
+holds, which is how `credential_process` invokes the helper. A terminal, a
+regular file, a socket, or a pipe read by any other process is refused.
+Cancelling the passphrase prompt fails the request, and the prompt closes by
+itself after two minutes. Concurrent calls wait for one another for up to
+three minutes, in no guaranteed order; if the lock cannot be taken, the
+request fails.
 
 ### 4. Optional but recommended: pin the CLI binary
 
@@ -263,6 +276,60 @@ sha256sum "$(readlink -f /usr/local/bin/aws)" |
 sudo chown root:root /etc/methuselah/aws-cli.sha256
 sudo chmod 0644 /etc/methuselah/aws-cli.sha256
 ```
+
+### 5. Required: restrict ptrace
+
+The caller checks read the AWS CLI's state at one moment. A process of your own
+that started the CLI could otherwise attach to it with `ptrace`, rewrite its
+arguments or memory, and detach before the helper looks. The helper therefore
+refuses to run unless the kernel's Yama `ptrace_scope` is 2 or 3, which stops
+a same-user parent from attaching:
+
+```bash
+echo 'kernel.yama.ptrace_scope = 2' |
+  sudo tee /etc/sysctl.d/10-methuselah-ptrace.conf
+sudo sysctl --system
+```
+
+Scope 2 also stops debuggers such as `gdb -p` and `strace -p` from attaching
+without `sudo`. If you cannot or will not accept that, create a root-owned
+waiver and accept that malware running as you can then defeat the caller
+checks:
+
+```bash
+sudo install -d -o root -g root -m 755 /etc/methuselah
+sudo touch /etc/methuselah/allow-weak-ptrace
+sudo chown root:root /etc/methuselah/allow-weak-ptrace
+```
+
+### 6. Optional: require signed credential files
+
+Anyone who can replace your encrypted file can encrypt keys of their own to
+your public key. Signing closes that gap, because only the holder of your
+signing key can produce a valid signature. Sign and encrypt in one step:
+
+```bash
+gpg --sign --encrypt --recipient you@example.com \
+  --output ~/.aws/prod.credentials.gpg credentials.txt
+```
+
+Then list the signing key in the root-owned `/etc/methuselah/aws-signers`
+(one `<profile> <fingerprint>` per line, 40 or 64 hex digits without spaces,
+`#` comments allowed; the primary key or the signing subkey fingerprint both
+work). Print it with `gpg --with-colons --fingerprint you@example.com`:
+
+```bash
+echo 'prod 0123456789ABCDEF0123456789ABCDEF01234567' |
+  sudo tee -a /etc/methuselah/aws-signers
+sudo chown root:root /etc/methuselah/aws-signers
+sudo chmod 0644 /etc/methuselah/aws-signers
+```
+
+A listed profile is refused unless its file carries a good signature from
+exactly that key. A profile with no entry, or an absent policy file, enforces
+nothing. A policy file that is not root-owned, is malformed, or lists a
+profile twice fails closed. Files written by `pass` are encrypted but not
+signed, so leave those profiles out.
 
 ## Setup with `pass` and `aws configure`
 
@@ -532,7 +599,9 @@ The helper writes no credentials, and exits non-zero, unless the caller:
 - shares the helper's root and mount namespace;
 - matches a pinned SHA-256 when `/etc/methuselah/aws-cli.sha256` exists, as
   described above;
-- reports no attached tracer when the helper reads the caller's `TracerPid`;
+- reports no attached tracer when the helper reads the caller's `TracerPid`,
+  and runs on a kernel whose Yama `ptrace_scope` is at least 2 (or has the
+  root-owned `/etc/methuselah/allow-weak-ptrace` waiver; see step 5);
 - was not started with `--endpoint-url`, `--ca-bundle`, `--no-verify-ssl`,
   `--debug`, or `--cli-auto-prompt`. A prefix of those options is refused
   too, such as `--endpoint` or `--no-verify`. `--cli-auto-prompt` is refused
@@ -549,8 +618,14 @@ The helper writes no credentials, and exits non-zero, unless the caller:
   `AWS_ENDPOINT_URL*`, `AWS_DATA_PATH`, `AWS_CA_BUNDLE`, `AWS_CONFIG_FILE`,
   `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONTAINER_CREDENTIALS_FULL_URI`,
   `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`,
-  `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, or
-  `SSLKEYLOGFILE`;
+  `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+  `OPENSSL_*` (OpenSSL can load code from them), or `SSLKEYLOGFILE`. The
+  `AWS_*` namespace is deny-by-default: only `AWS_PROFILE`,
+  `AWS_DEFAULT_PROFILE`, `AWS_REGION`, `AWS_DEFAULT_REGION`,
+  `AWS_DEFAULT_OUTPUT`, `AWS_PAGER`, `AWS_MAX_ATTEMPTS`, `AWS_RETRY_MODE`,
+  `AWS_EC2_METADATA_DISABLED`, `AWS_CLI_FILE_ENCODING`, and
+  `AWS_CLI_AUTO_PROMPT=off` are accepted, so exported `AWS_ACCESS_KEY_ID`
+  and its relatives, and any other `AWS_*` setting, are refused;
 - uses a root-controlled `HOME`, set once and non-empty. When `.aws/config`
   or `.aws/credentials` is present, that file is root-controlled too.
   `config` has no `[plugins]` section. Neither file sets `cli_auto_prompt`
@@ -558,13 +633,37 @@ The helper writes no credentials, and exits non-zero, unless the caller:
   `AWS_CLI_AUTO_PROMPT` must be unset or `off`;
 - maps only executable files owned by root or the `methuselah` account,
   through paths with the same ownership rules, apart from libffi's
-  `/memfd:libffi` trampoline. Other deleted mappings are refused.
+  `/memfd:libffi` trampoline. Other deleted mappings are refused. No mapping
+  may be a writable and executable file mapping, and none may be anonymous
+  and executable (`[vdso]`, `[vsyscall]`, and the libffi trampoline are
+  exempt). Anonymous executable memory is what injected code looks like, but
+  some libffi builds also use it for closures; if your AWS CLI trips this
+  check (`AWS CLI has ... executable memory`), accept it with a root-owned
+  waiver: `sudo touch /etc/methuselah/allow-anonymous-exec`. A writable and
+  executable *file* mapping is always refused;
+- writes only to a pipe that the verified caller holds the read end of.
 
-The tracer check is a snapshot and does not prevent a later attachment.
+The tracer check is a snapshot; it is the Yama requirement that stops a later
+attachment.
 
 The caller is verified before the passphrase prompt. After the prompt the
 helper checks that the parent is still that caller, verifies it again, and
 writes nothing if a signal arrived in between.
+
+## Threat model
+
+The helper decides which *program* receives your credentials: the genuine,
+unmodified AWS CLI v2 that you installed, started in a clean environment with
+configuration only root can change, with your encrypted file unaltered (when
+signing is on). It is designed to refuse look-alike binaries, redirected
+endpoints, injected libraries, and replaced files.
+
+It does not stop everything. A process running as you that is allowed to
+`ptrace` the CLI can read or rewrite its memory, so the Yama requirement in
+step 5 is part of the model, not an extra. With the waiver in place, or with
+`CAP_SYS_PTRACE` or root in play, malware running as you can obtain the
+credentials. Likewise, a genuine CLI you trust still uses them for whatever
+commands it is given.
 
 ## Limitations
 
@@ -578,8 +677,10 @@ writes nothing if a signal arrived in between.
 - The `methuselah` account can replace its own AWS CLI files. That is the
   trust delegated to the service account. The root-owned pin detects a
   changed executable until the pin is refreshed.
-- Environment and arguments are what the CLI was started with, which is what
-  the kernel reports in `/proc`. Linux only. A caller in another mount
+- Arguments and environment are read from `/proc/<pid>/cmdline` and
+  `/proc/<pid>/environ`, which reflect the process's current stack memory and
+  can be rewritten by a process that is allowed to `ptrace` it. That is why
+  `ptrace_scope` matters. Linux only. A caller in another mount
   namespace, or with a different root, cannot be verified.
 - An AWS CLI you trust can still use the credentials as the commands you give
   it direct. This helper decides who receives them, not what that CLI does.

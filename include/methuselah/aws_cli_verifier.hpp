@@ -22,7 +22,9 @@ namespace methuselah {
 //     owned by root or the `methuselah` service account, none of them writable
 //     by group or others.
 //  2. Optionally, its SHA-256 matches a root-owned pin list.
-//  3. No tracer is reported when the caller's TracerPid is checked.
+//  3. No tracer is reported when the caller's TracerPid is checked, and the
+//     kernel's Yama ptrace_scope forbids a same-user parent from attaching
+//     later (a root-owned waiver file can accept weaker systems).
 //  4. Its argv does not redirect, weaken, or dump what it does with
 //     credentials (--endpoint-url, --no-verify-ssl, --debug,
 //     `configure export-credentials`, ...).
@@ -30,7 +32,12 @@ namespace methuselah {
 //     endpoint, or trust-store overrides.
 //  6. Its CLI configuration files are root controlled, with no plugins
 //     or auto-prompt activation.
-//  7. Every executable file mapping is trusted, except libffi trampolines.
+//  7. Every executable file mapping is trusted, except libffi trampolines,
+//     and no mapping is writable and executable or anonymous and executable.
+//
+// Threat model: this decides which *program* receives the credentials. It
+// does not defend against a malicious process of the same user that can
+// ptrace the AWS CLI; the Yama requirement above is what closes that door.
 class AwsCliVerifier {
 public:
   struct Options {
@@ -47,6 +54,18 @@ public:
     // default_options() adds the unprivileged `methuselah` service account
     // when it exists. The calling user is never added.
     std::vector<uid_t> install_owners{0};
+    // Smallest accepted Yama ptrace_scope (2: only CAP_SYS_PTRACE may attach).
+    // Zero or less disables the check, for tests.
+    int min_ptrace_scope = 2;
+    std::filesystem::path ptrace_scope_file =
+        "/proc/sys/kernel/yama/ptrace_scope";
+    // When this file exists and passes the root-owned trust rules, a weaker
+    // or missing ptrace_scope is accepted. Empty: no waiver.
+    std::filesystem::path ptrace_waiver_file;
+    // When this file exists and passes the root-owned trust rules, anonymous
+    // executable memory is accepted (file-backed writable+executable never
+    // is). Empty: no waiver.
+    std::filesystem::path anonymous_exec_waiver_file;
   };
 
   [[nodiscard]] static Options default_options();
@@ -55,6 +74,11 @@ public:
   explicit AwsCliVerifier(Options options) : options_(std::move(options)) {}
 
   [[nodiscard]] SecurityVerdict verify(pid_t pid) const;
+
+  // Confirms that `fd` is a pipe whose read end the verified caller holds, so
+  // the credentials can only be read by that process.
+  [[nodiscard]] static SecurityVerdict verify_output_channel(pid_t caller,
+                                                             int fd);
 
   // Pure helpers, exposed for unit tests.
 
@@ -79,6 +103,25 @@ public:
   [[nodiscard]] static std::vector<std::string>
   executable_mapping_paths(std::string_view maps);
 
+  enum class UnsafeMapping {
+    none,
+    // A file mapping that is writable and executable: never legitimate.
+    file_writable_executable,
+    // Anonymous memory that is writable and executable, or executable at
+    // all. Some libffi builds fall back to this for closures, so a root-owned
+    // waiver file can accept it.
+    anonymous_writable_executable,
+    anonymous_executable,
+  };
+
+  // Inspects /proc/<pid>/maps for executable memory that no file vouches for
+  // ([vdso], [vsyscall] and the libffi trampoline memfd are exempt).
+  [[nodiscard]] static UnsafeMapping unsafe_mapping(std::string_view maps);
+
+  // Parses the content of /proc/sys/kernel/yama/ptrace_scope (0 to 3).
+  [[nodiscard]] static std::optional<int>
+  parse_ptrace_scope(std::string_view text);
+
   // Parses sha256sum-style lines ("<64 hex>  <name>"), '#' comments and blank
   // lines allowed. Digests are returned lowercase. Any malformed line makes
   // the whole list invalid (nullopt), as does an empty list.
@@ -89,6 +132,8 @@ public:
   [[nodiscard]] static std::optional<std::string> sha256_hex(int fd);
 
 private:
+  [[nodiscard]] SecurityVerdict verify_ptrace_policy() const;
+
   Options options_;
 };
 

@@ -15,6 +15,20 @@
 #include <unistd.h>
 
 namespace methuselah {
+namespace {
+
+// A stalled holder (for example an unanswered passphrase dialog) must not
+// block every later credential_process call for ever.
+constexpr time_t kWaitSeconds = 180;
+
+time_t monotonic_seconds() {
+  timespec now{};
+  ::clock_gettime(CLOCK_MONOTONIC, &now);
+  return now.tv_sec;
+}
+
+} // namespace
+
 InstanceLock::InstanceLock(Mode mode) {
   const char *runtime_dir = std::getenv("XDG_RUNTIME_DIR");
   const char *suffix = mode == Mode::wait ? "-credential-process" : "";
@@ -37,7 +51,8 @@ InstanceLock::InstanceLock(Mode mode) {
     ::sigaddset(&cancellation, SIGTERM);
     if (::sigprocmask(SIG_BLOCK, &cancellation, &original) == 0) {
       bool locked = false;
-      while (!SignalGuard::received()) {
+      const time_t deadline = monotonic_seconds() + kWaitSeconds;
+      while (!SignalGuard::received() && monotonic_seconds() < deadline) {
         if (::flock(fd_, LOCK_EX | LOCK_NB) == 0) {
           locked = true;
           break;

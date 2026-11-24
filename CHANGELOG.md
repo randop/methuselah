@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--macro=aws`: an AWS CLI `credential_process` helper. Credentials stay in
   the GPG-encrypted file mapped by the `[aws:<profile>]` section of
   `~/.config/pinentry.methuselah` and are released only to a verified AWS CLI
-  v2 as the JSON document the CLI expects, written straight to its pipe or
-  socket. The optional argument selects the profile (`default` when omitted);
+  v2 as the JSON document the CLI expects, written straight to the pipe it
+  reads. The optional argument selects the profile (`default` when omitted);
   profile names are 1 to 64 characters from letters, digits, `_`, `-`, `.`,
   and `@`. Setup and verification are documented in `docs/aws.md`.
 - `AwsCliVerifier`: refuses to hand over credentials unless the caller:
@@ -27,8 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `sha256sum`-style list with `#` comments and blank lines; a file that is
     present but not root-owned, unreadable, malformed, empty, or larger than
     64 KiB fails closed;
-  - reports no attached tracer (a snapshot only, not protection against a
-    later attachment);
+  - reports no attached tracer (a snapshot) and runs under a Yama
+    `ptrace_scope` of at least 2, which is what stops a same-user parent from
+    attaching later; a root-owned `/etc/methuselah/allow-weak-ptrace` waives
+    this;
   - was not started with `--endpoint-url`, `--ca-bundle`, `--no-verify-ssl`,
     `--debug`, `--cli-auto-prompt`, or `configure export-credentials`,
     including unambiguous option prefixes; `--cli-auto-prompt` is refused even
@@ -64,9 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ProcessInfo::readProc()` and `ProcessInfo::argv()`,
   `GpgDecryptor::decrypt_fd()`, and `resolve_path(..., canonicalize)` support
   the AWS flow.
-- `InstanceLock::Mode::wait`: concurrent `credential_process` calls queue on a
-  separate lock file instead of exiting, with `SIGINT`/`SIGTERM` cancelling
-  the wait.
+- `InstanceLock::Mode::wait`: concurrent `credential_process` calls wait on a
+  separate lock file instead of exiting, in no guaranteed order and for at most
+  three minutes; `SIGINT`/`SIGTERM` cancel the wait.
+- `AwsSigners` and `GpgDecryptor::decrypt_fd(..., required_signer)`: when the
+  root-owned `/etc/methuselah/aws-signers` lists a profile, its credential
+  file must be signed (and encrypted) by exactly that OpenPGP key. Other
+  profiles, and an absent policy file, enforce nothing; a policy file that is
+  not root-owned or is malformed fails closed.
 - Unit tests (`meson test -C .build`) for credential parsing, argument,
   environment, CLI-config, memory-map, pin, and hash checks, the trust policy,
   service-account installs, `SecurityVerdict`, and `verify()` against real
@@ -96,10 +103,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The unknown-macro check now runs before the instance lock is taken.
 
 ### Security
+- Output is bound to the verified caller: stdout must be a pipe whose read end
+  the AWS CLI holds, checked before the prompt and again before writing.
+  Sockets and pipes read by anyone else are refused.
+- The environment check is deny-by-default for `AWS_*` (only inert settings
+  such as `AWS_PROFILE` and `AWS_REGION` pass) and also refuses `OPENSSL_*`,
+  which can load code or swap the trust store after the one-time memory-map
+  check.
+- Memory maps are rejected when a file mapping is writable and executable,
+  or any region is anonymous and executable (the latter can be accepted with a
+  root-owned `/etc/methuselah/allow-anonymous-exec`, because some libffi
+  builds use anonymous executable memory for closures).
+- Credentials that expire within 15 minutes are refused, because the CLI would
+  otherwise re-run the helper, and its passphrase prompt, on every request.
+- The passphrase prompt closes after two minutes and the `credential_process`
+  lock wait gives up after three, so an abandoned dialog cannot block every
+  later request for ever.
+- `scripts/aws.sh` verifies the AWS CLI installer's signature against the
+  published signing key and downloads, verifies, unpacks, and runs it inside a
+  private directory owned by the service account, so another process of the
+  invoking user cannot swap files between verification and installation (the
+  SHA-256 pin is taken from what was installed).
 - The AWS macro re-verifies the caller after the passphrase prompt, right
   before writing credentials. It checks that the parent is still the verified
   caller, aborts if a signal arrived, and refuses a stdout that is not a pipe
-  or socket.
+  the caller reads.
 - The encrypted credentials file must be a regular file owned by the user and
   not writable by group or others; a symlink in its final path component is
   refused.
