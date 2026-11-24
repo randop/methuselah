@@ -33,6 +33,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -282,11 +283,12 @@ constexpr int kUnlockBudgetSeconds = 120;
 
 // Reuses an unlocked gpg-agent when possible, otherwise asks for the
 // passphrase. Unlike the git flow, cancelling is a failure: the CLI must not
-// see an empty, "successful" reply.
+// see an empty, "successful" reply. The caller owns what is being unlocked, so
+// it supplies the dialog title, as the other flows do.
 std::optional<DecryptResult>
 unlock_credentials(const GpgDecryptor &decryptor, int fd,
                    const std::filesystem::path &file,
-                   std::string_view required_signer) {
+                   std::string_view required_signer, std::string title) {
   auto remembered = decryptor.decrypt_fd(fd, SecureString{}, required_signer);
   if (remembered.ok()) {
     return remembered;
@@ -303,7 +305,7 @@ unlock_credentials(const GpgDecryptor &decryptor, int fd,
   }
 
   PromptOptions options;
-  options.title = "aws credentials";
+  options.title = std::move(title);
   options.message = kDefaultMessage;
 
   const auto deadline = std::chrono::steady_clock::now() +
@@ -368,8 +370,8 @@ int run_aws_flow(const std::string &profile, pid_t caller,
   }
 
   GpgDecryptor decryptor;
-  auto unlocked =
-      unlock_credentials(decryptor, file.get(), *gpg_path, signer.fingerprint);
+  auto unlocked = unlock_credentials(decryptor, file.get(), *gpg_path,
+                                     signer.fingerprint, "aws credentials");
   if (!unlocked) {
     std::cerr << "Error: could not unlock aws credentials for profile "
               << profile << std::endl;
