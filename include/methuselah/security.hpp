@@ -110,6 +110,10 @@ public:
   // Verifies that the supplied process is an untampered AWS CLI v2 owned by
   // root or the dedicated service account (see AwsCliVerifier).
   [[nodiscard]] SecurityVerdict verify_aws(pid_t pid) const;
+
+  // Verifies that the supplied process is an untampered Docker CLI owned by
+  // root or the dedicated service account (see DockerCliVerifier).
+  [[nodiscard]] SecurityVerdict verify_docker(pid_t pid) const;
 };
 
 } // namespace methuselah

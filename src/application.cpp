@@ -6,6 +6,9 @@
 #include "methuselah/aws_credentials.hpp"
 #include "methuselah/aws_signers.hpp"
 #include "methuselah/config.hpp"
+#include "methuselah/docker_cli_verifier.hpp"
+#include "methuselah/docker_credentials.hpp"
+#include "methuselah/docker_signers.hpp"
 #include "methuselah/fd_io.hpp"
 #include "methuselah/git_credentials.hpp"
 #include "methuselah/gpg_decrypt.hpp"
@@ -18,6 +21,7 @@
 #include "methuselah/secure_memory.hpp"
 #include "methuselah/security.hpp"
 #include "methuselah/signal_guard.hpp"
+#include "methuselah/text_util.hpp"
 #include "methuselah/ui_session.hpp"
 
 #include <spdlog/spdlog.h>
@@ -46,6 +50,18 @@ constexpr const char kDefaultMessage[] =
 constexpr const char kConfigFile[] = "$HOME/.config/pinentry.methuselah";
 
 Macro parse_macro(int argc, char **argv) {
+  // Docker runs an external credential helper by name, without a --macro
+  // argument. A symlink or copy installed as docker-credential-methuselah is
+  // the Docker macro.
+  if (argc >= 1) {
+    const std::string_view program{argv[0]};
+    if (program == "docker-credential-methuselah" ||
+        program.ends_with("/docker-credential-methuselah")) {
+      SPDLOG_TRACE("macro: docker (credential helper name)");
+      return Macro::Docker;
+    }
+  }
+
   if (argc < 2) {
     return Macro::Unknown;
   }
@@ -66,6 +82,9 @@ Macro parse_macro(int argc, char **argv) {
   } else if (flag == "--macro=aws") {
     SPDLOG_TRACE("macro: aws");
     return Macro::Aws;
+  } else if (flag == "--macro=docker") {
+    SPDLOG_TRACE("macro: docker");
+    return Macro::Docker;
   }
   return Macro::Unknown;
 }
@@ -402,6 +421,193 @@ int run_aws_flow(const std::string &profile, pid_t caller,
   return written ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+std::optional<std::filesystem::path> docker_gpg_path(std::string_view server) {
+  const std::filesystem::path config_path = resolve_path(kConfigFile);
+  const auto config = load_config(config_path);
+  if (!config) {
+    return std::nullopt;
+  }
+
+  const auto sections = docker_config_sections(server);
+  for (const auto &section : sections) {
+    const auto gpg_file = config->gpg_file_for(section);
+    if (!gpg_file) {
+      continue;
+    }
+    // Keep the final component intact so open() can reject a symlink.
+    return resolve_path(*gpg_file, false);
+  }
+
+  std::cerr << "ERROR(configuration): no [" << sections.front()
+            << "] gpgfile in " << config_path.string() << std::endl;
+  return std::nullopt;
+}
+
+// Docker writes the registry address to the helper's stdin. It is not a
+// secret, but it is still bounded so a runaway caller cannot grow the helper's
+// memory.
+std::optional<std::string> read_docker_request() {
+  ReadResult read = read_all(STDIN_FILENO, 4096);
+  if (read.status == ReadStatus::too_large) {
+    std::cerr << "Error: docker credential helper request is too large"
+              << std::endl;
+    return std::nullopt;
+  }
+  if (read.status != ReadStatus::ok) {
+    std::cerr << "Error: cannot read docker credential helper request"
+              << std::endl;
+    return std::nullopt;
+  }
+
+  const std::string_view request = strutil::trim(read.data);
+  if (request.find('\0') != std::string_view::npos) {
+    std::cerr << "Error: docker credential helper request is malformed"
+              << std::endl;
+    return std::nullopt;
+  }
+  return std::string(request);
+}
+
+// The passphrase prompt can stay open for a long time. Make sure the process
+// that is about to receive the secrets is still the verified Docker CLI.
+bool docker_caller_still_trusted(pid_t caller, const Security &security) {
+  if (ProcessInfo::parent() != caller) {
+    std::cerr << "Error: docker caller changed while unlocking credentials"
+              << std::endl;
+    return false;
+  }
+  return caller_verified("docker", security.verify_docker(caller)) &&
+         caller_verified("docker", DockerCliVerifier::verify_output_channel(
+                                       caller, STDOUT_FILENO));
+}
+
+int run_docker_get(pid_t caller, const Security &security) {
+  // Check that the verified CLI holds a read end and that no other reader
+  // is visible in /proc at this point. This cannot guarantee exclusive access.
+  if (!caller_verified("docker", DockerCliVerifier::verify_output_channel(
+                                     caller, STDOUT_FILENO))) {
+    return EXIT_FAILURE;
+  }
+
+  const auto server = read_docker_request();
+  if (!server) {
+    return EXIT_FAILURE;
+  }
+  if (!valid_docker_server(*server)) {
+    std::cerr << "Error: invalid docker registry address" << std::endl;
+    return EXIT_FAILURE;
+  }
+  SPDLOG_TRACE("docker server: {}", *server);
+
+  const auto signer =
+      DockerSigners::load(DockerSigners::default_file(), *server);
+  if (!signer.passed()) {
+    std::cerr << "Error: " << signer.reason << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  SPDLOG_TRACE("processing docker gpg credentials...");
+  const auto gpg_path = docker_gpg_path(*server);
+  if (!gpg_path) {
+    SPDLOG_TRACE("FAIL: docker_gpg_path");
+    return EXIT_FAILURE;
+  }
+  const UniqueFd file(::open(gpg_path->c_str(),
+                             O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK));
+  if (!credential_file_is_private(file.get()) ||
+      ::fcntl(file.get(), F_SETFL, 0) == -1) {
+    std::cerr << "Error: " << gpg_path->string()
+              << " must be a regular file owned by you and not writable by "
+                 "group or others"
+              << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  SPDLOG_TRACE("unlocking docker credentials...");
+  GpgDecryptor decryptor;
+  auto unlocked =
+      unlock_credentials(decryptor, {file.get(), *gpg_path, signer.fingerprint,
+                                     "docker credentials"});
+  if (!unlocked) {
+    std::cerr << "Error: could not unlock docker credentials for " << *server
+              << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  const auto [ec, reason, credentials] =
+      DockerCredentials::parse(unlocked->plaintext());
+  if (ec != std::errc{}) {
+    std::cerr << "Error: " << reason << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  if (!docker_caller_still_trusted(caller, security) ||
+      SignalGuard::received()) {
+    return EXIT_FAILURE;
+  }
+
+  SecureString json = credentials.to_credential_helper_json(*server);
+  std::cout.flush();
+  const bool written = secure_write(STDOUT_FILENO, json);
+  secure_clear(json);
+  return written ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+int run_docker_list(pid_t caller) {
+  if (!caller_verified("docker", DockerCliVerifier::verify_output_channel(
+                                     caller, STDOUT_FILENO))) {
+    return EXIT_FAILURE;
+  }
+
+  // The helper is read-only: it cannot enumerate encrypted files without
+  // asking for their passphrases, and it stores nothing. An empty object is
+  // the truthful answer to `list`.
+  constexpr std::string_view kEmptyList = "{}\n";
+  std::cout.flush();
+  return secure_write(STDOUT_FILENO, kEmptyList) ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+// Docker invokes the helper as `docker-credential-methuselah get`, while
+// `methuselah --macro=docker get` has the flag in between. The action is the
+// first argument that is neither the macro flag nor the `--` delimiter.
+std::string_view docker_action(int argc, char **argv) {
+  for (int i = 1; i < argc; ++i) {
+    const std::string_view arg{argv[i]};
+    if (arg == "--" || arg.starts_with("--macro=")) {
+      continue;
+    }
+    return arg;
+  }
+  return {};
+}
+
+int run_docker_macro(int argc, char **argv, const Security &security) {
+  const pid_t caller = ProcessInfo::parent();
+  if (!caller_verified("docker", security.verify_docker(caller))) {
+    return EXIT_FAILURE;
+  }
+
+  const std::string_view action = docker_action(argc, argv);
+  if (action.empty()) {
+    std::cerr << "Error: missing docker credential helper action" << std::endl;
+    return EXIT_FAILURE;
+  }
+  if (action == "get") {
+    return run_docker_get(caller, security);
+  }
+  if (action == "list") {
+    return run_docker_list(caller);
+  }
+  if (action == "store" || action == "erase") {
+    std::cerr << "Error: the docker macro is read-only; edit the GPG-encrypted "
+                 "file and its [docker:...] section instead"
+              << std::endl;
+    return EXIT_FAILURE;
+  }
+  std::cerr << "Error: unknown docker credential helper action" << std::endl;
+  return EXIT_FAILURE;
+}
+
 // One entry point per macro: verify the caller, then run the flow.
 int run_gpg_macro(const Security &security) {
   SPDLOG_TRACE("gpg security verification...");
@@ -461,13 +667,14 @@ int Application::run(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  // credential_process callers queue behind each other and must never get an
+  // Credential helper callers queue behind each other and must never get an
   // empty "success"; the GUI macros keep the single-instance behaviour.
-  InstanceLock lock(macro == Macro::Aws ? InstanceLock::Mode::wait
-                                        : InstanceLock::Mode::focus_existing);
+  const bool credential_helper = macro == Macro::Aws || macro == Macro::Docker;
+  InstanceLock lock(credential_helper ? InstanceLock::Mode::wait
+                                      : InstanceLock::Mode::focus_existing);
   if (!lock.acquired()) {
-    if (macro == Macro::Aws) {
-      std::cerr << "Error: could not take the credential_process lock "
+    if (credential_helper) {
+      std::cerr << "Error: could not take the credential helper lock "
                    "(another request is still waiting for a passphrase)"
                 << std::endl;
       return EXIT_FAILURE;
@@ -482,6 +689,8 @@ int Application::run(int argc, char **argv) {
     return run_git_macro(argc, argv, security);
   case Macro::Aws:
     return run_aws_macro(argc, argv, security);
+  case Macro::Docker:
+    return run_docker_macro(argc, argv, security);
   case Macro::Dummy:
     return run_dummy();
   case Macro::Ssh:

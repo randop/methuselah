@@ -5,6 +5,110 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-11-26
+
+### Added
+- `--macro=docker`: a read-only Docker credential helper, also selected when
+  the program is invoked as `docker-credential-methuselah`. It answers `get`
+  and `list`; `store` and `erase` are refused. Credentials stay in the
+  GPG-encrypted file mapped by the `[docker:<server>]` section of
+  `~/.config/pinentry.methuselah` and are written as the JSON document the
+  helper protocol expects. Registry names are matched exactly, without the
+  scheme or a trailing slash, by host, and through Docker Hub's
+  `docker.io`/`index.docker.io`/`registry-1.docker.io` spellings. Setup and
+  verification are documented in `docs/docker.md`.
+- `DockerCliVerifier`: refuses to hand over credentials unless the caller:
+  - is the native `docker` executable at `/opt/methuselah/docker/docker`,
+    `/usr/local/bin/docker`, or `/usr/bin/docker`, matched by the inode of
+    `/proc/<pid>/exe`, so a copied, renamed, swapped, or deleted binary
+    fails. Every path component and the executable are owned by root or the
+    `methuselah` service account, never the calling user, and are not
+    writable by group or others. The caller must also share the helper's root
+    and mount namespace;
+  - matches a SHA-256 digest when the root-owned
+    `/etc/methuselah/docker-cli.sha256` pin file exists. The file is a
+    `sha256sum`-style list with `#` comments and blank lines; a file that is
+    present but not root-owned, unreadable, malformed, empty, or larger than
+    64 KiB fails closed;
+  - reports no attached tracer (a snapshot) and runs under a Yama
+    `ptrace_scope` of at least 2; the root-owned
+    `/etc/methuselah/allow-weak-ptrace` waives this;
+  - was not started with a global option before the subcommand that redirects
+    the daemon, swaps the config, or weakens TLS: `--config`, `--context`,
+    `--host`, `-c`, `-H`, `--tls*`, `--debug`, or `-D`. Options after the
+    subcommand are not global and are not checked;
+  - was not started with loader, interpreter, resolver, or trust-store
+    overrides: `LD_*`, `MALLOC_*`, `GCONV_PATH`, `LOCPATH`, `NLSPATH`,
+    `HOSTALIASES`, `GODEBUG`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+    `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `OPENSSL_*`, or
+    `SSLKEYLOGFILE`. `DOCKER_*` is deny-by-default: only `DOCKER_API_VERSION`,
+    `DOCKER_BUILDKIT`, `DOCKER_CLI_EXPERIMENTAL`, `DOCKER_CLI_HINTS`,
+    `DOCKER_CONTENT_TRUST`, `DOCKER_DEFAULT_PLATFORM`,
+    `DOCKER_HIDE_LEGACY_COMMANDS`, `DOCKER_SCAN_SUGGEST`, and
+    `DOCKER_STACK_ORCHESTRATOR` pass. `DOCKER_CONFIG`, `DOCKER_HOST`,
+    `DOCKER_CONTEXT`, `DOCKER_TLS`, `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`,
+    `DOCKER_AUTH_CONFIG`, `DOCKER_CUSTOM_HEADERS`, and
+    `DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND` are refused;
+  - has a root-controlled, non-empty `HOME` set once; `.docker` and
+    `.docker/config.json` under it are root-controlled too;
+  - maps only executable files owned by root or the `methuselah` account
+    through trusted paths, apart from libffi's `/memfd:libffi` trampoline.
+    Deleted mappings other than that trampoline are refused. No mapping may
+    be a writable and executable file mapping or anonymous and executable
+    (the latter can be accepted with a root-owned
+    `/etc/methuselah/allow-anonymous-exec`);
+  - writes only to a pipe whose read end the verified caller holds.
+- `DockerCredentials`: parses `username`/`password` lines (with `user`,
+  `login`, `email`, `secret`, `token`, `identitytoken`, and `identity`
+  aliases, an optional `docker` prefix, and case-insensitive names), rejects
+  unknown and duplicate keys, validates lengths and control characters, keeps
+  the values in guarded `SecureString`s, and escapes them into the helper's
+  JSON. Errors never include the values.
+- `DockerSigners` and the optional root-owned
+  `/etc/methuselah/docker-signers`: when a server is listed, its credential
+  file must carry a good signature from that OpenPGP key and every signature
+  on the file must verify. Servers use the same aliases as the configuration
+  sections; an absent file or an unlisted server enforces nothing. A policy
+  file that is not root-owned, malformed, too large, or lists overlapping
+  spellings fails closed.
+- Unit tests (`meson test -C .build`) for Docker credential parsing, JSON
+  escaping, server aliases, signer policy, argument and environment checks,
+  pin and hash handling, memory maps, ptrace parsing, output-channel checks,
+  `SecurityVerdict`, and `verify_docker()` against real `/proc` state.
+- `Security::verify_docker()` exposes the Docker caller check and returns a
+  `SecurityVerdict`, mirroring `verify_aws()`.
+- `docs/docker.md` with install, encryption, registry mapping, root-controlled
+  Docker home, pinning, ptrace, signing, and verification guidance; the README
+  lists Docker support and links to it.
+
+### Changed
+- `InstanceLock::Mode::wait` is used for the Docker macro, so concurrent
+  helper requests wait for the passphrase prompt instead of returning an
+  empty success.
+- The Docker macro selects its action from the first argument that is not
+  `--macro=docker` or `--`, so both `methuselah --macro=docker get` and
+  `docker-credential-methuselah get` work.
+
+### Security
+- Output is bound to the verified caller: stdout must be a pipe whose read
+  end the Docker CLI holds, checked before the prompt and again before
+  writing. Sockets and pipes read by anyone else are refused.
+- The Docker macro re-verifies the caller after the passphrase prompt, right
+  before writing credentials. It checks that the parent is still the verified
+  caller, aborts if a signal arrived, and refuses a stdout that is not a pipe
+  the caller reads.
+- The encrypted credentials file must be a regular file owned by the user and
+  not writable by group or others; a symlink in its final path component is
+  refused.
+- The root-controlled `HOME`, `.docker`, and `.docker/config.json` requirement
+  prevents a user-writable Docker config from changing `credHelpers`,
+  `currentContext`, or CLI plugins behind the helper's back.
+- Credentials are parsed into guarded `SecureString`s, and the JSON document
+  is assembled and written with the secure memory helpers rather than
+  `std::cout`.
+- A failed, cancelled, or contended Docker request exits non-zero with no
+  output; it never reports an empty success.
+
 ## [0.8.0] - 2026-11-24
 
 ### Added

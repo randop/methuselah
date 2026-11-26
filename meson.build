@@ -131,6 +131,9 @@ sources = files(
     'src/aws_cli_verifier.cpp',
     'src/aws_signers.cpp',
     'src/config.cpp',
+    'src/docker_cli_verifier.cpp',
+    'src/docker_credentials.cpp',
+    'src/docker_signers.cpp',
     'src/git_credentials.cpp',
     'src/git_helper.cpp',
     'src/gpg_decrypt.cpp',
@@ -185,6 +188,7 @@ unit_tests = executable(
         'src/aws_credentials.cpp',
         'src/aws_cli_verifier.cpp',
         'src/aws_signers.cpp',
+        'src/docker_cli_verifier.cpp',
         'src/git_helper.cpp',
         'src/process_info.cpp',
         'src/security.cpp',
@@ -197,6 +201,29 @@ unit_tests = executable(
     install: false,
 )
 test('aws credential helper', unit_tests)
+
+# Docker credential helper tests. The verifier shares Security and /proc
+# helpers with the AWS target, so the same supporting sources are linked.
+docker_unit_tests = executable(
+    'methuselah-docker-unit-tests',
+    files(
+        'tests/unit/docker_test.cpp',
+        'src/aws_cli_verifier.cpp',
+        'src/docker_cli_verifier.cpp',
+        'src/docker_credentials.cpp',
+        'src/docker_signers.cpp',
+        'src/git_helper.cpp',
+        'src/process_info.cpp',
+        'src/security.cpp',
+        'src/ssh_helper.cpp',
+    ),
+    dependencies: [spdlog_dep, sodium_dep],
+    include_directories: include_directories('include'),
+    cpp_args: ['-Wall', '-Wextra'],
+    build_by_default: false,
+    install: false,
+)
+test('docker credential helper', docker_unit_tests)
 
 # This integration test uses gpg and gpgconf to create an isolated keyring.
 decrypt_fd_test = executable(

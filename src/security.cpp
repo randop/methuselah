@@ -1,6 +1,7 @@
 #include "config.h"
 
 #include "methuselah/aws_cli_verifier.hpp"
+#include "methuselah/docker_cli_verifier.hpp"
 #include "methuselah/fd_io.hpp"
 #include "methuselah/git_helper.hpp"
 #include "methuselah/process_info.hpp"
@@ -383,6 +384,10 @@ SecurityVerdict Security::verify_ssh() const {
 
 SecurityVerdict Security::verify_aws(pid_t pid) const {
   return AwsCliVerifier{}.verify(pid);
+}
+
+SecurityVerdict Security::verify_docker(pid_t pid) const {
+  return DockerCliVerifier{}.verify(pid);
 }
 
 } // namespace methuselah
