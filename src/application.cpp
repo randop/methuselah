@@ -428,7 +428,8 @@ std::optional<std::filesystem::path> docker_gpg_path(std::string_view server) {
     return std::nullopt;
   }
 
-  for (const auto &section : docker_config_sections(server)) {
+  const auto sections = docker_config_sections(server);
+  for (const auto &section : sections) {
     const auto gpg_file = config->gpg_file_for(section);
     if (!gpg_file) {
       continue;
@@ -437,8 +438,8 @@ std::optional<std::filesystem::path> docker_gpg_path(std::string_view server) {
     return resolve_path(*gpg_file, false);
   }
 
-  std::cerr << "ERROR(configuration): no [docker:" << server << "] gpgfile in "
-            << config_path.string() << std::endl;
+  std::cerr << "ERROR(configuration): no [" << sections.front()
+            << "] gpgfile in " << config_path.string() << std::endl;
   return std::nullopt;
 }
 

@@ -4,6 +4,7 @@
 #include "methuselah/security.hpp"
 #include "methuselah/text_util.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <set>
 
@@ -61,11 +62,15 @@ DockerSigners::parse(std::string_view text) {
 
 DockerSigners::Lookup DockerSigners::find(const Entries &entries,
                                           std::string_view server) {
-  for (const auto &alias : docker_server_aliases(server)) {
-    for (const auto &[name, fingerprint] : entries) {
-      if (name == alias) {
-        return {std::errc{}, "ok", fingerprint};
-      }
+  const auto aliases = docker_server_aliases(server);
+  for (const auto &[name, fingerprint] : entries) {
+    const auto policy_aliases = docker_server_aliases(name);
+    if (std::any_of(policy_aliases.begin(), policy_aliases.end(),
+                    [&](const auto &alias) {
+                      return std::find(aliases.begin(), aliases.end(), alias) !=
+                             aliases.end();
+                    })) {
+      return {std::errc{}, "ok", fingerprint};
     }
   }
   return {std::errc{}, "ok", {}};

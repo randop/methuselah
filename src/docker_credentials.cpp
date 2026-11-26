@@ -10,6 +10,8 @@
 #include <string_view>
 #include <utility>
 
+#include <arpa/inet.h>
+
 namespace methuselah {
 namespace {
 
@@ -63,16 +65,43 @@ DockerParseResult invalid(std::string_view reason) {
   return {std::errc::invalid_argument, reason, {}};
 }
 
-// Values stay on one line and may contain printable ASCII, UTF-8 bytes, and
-// tabs. Control characters are refused, so the only JSON escaping that is
-// needed is for quotes, backslashes, and the two whitespace characters.
+// Values stay on one line and may contain printable ASCII, tabs, and valid
+// UTF-8. Inspect the bytes in place without copying the credential.
 bool valid_value(std::string_view value, const FieldSpec &spec) {
   if (value.size() < spec.min_size || value.size() > spec.max_size) {
     return false;
   }
-  return std::all_of(value.begin(), value.end(), [](unsigned char c) {
-    return c == '\t' || (c >= 0x20 && c != 0x7f);
-  });
+  for (std::size_t i = 0; i < value.size();) {
+    const auto lead = static_cast<unsigned char>(value[i++]);
+    if (lead < 0x80) {
+      if (lead != '\t' && (lead < 0x20 || lead == 0x7f)) {
+        return false;
+      }
+      continue;
+    }
+    if (lead < 0xc2 || lead > 0xf4) {
+      return false;
+    }
+    const std::size_t length = lead < 0xe0 ? 1 : lead < 0xf0 ? 2 : 3;
+    if (value.size() - i < length) {
+      return false;
+    }
+    // Restrict the first continuation byte to exclude overlong encodings,
+    // surrogates, and code points above U+10FFFF.
+    const unsigned char min = lead == 0xe0 ? 0xa0 : lead == 0xf0 ? 0x90 : 0x80;
+    const unsigned char max = lead == 0xed ? 0x9f : lead == 0xf4 ? 0x8f : 0xbf;
+    const auto first = static_cast<unsigned char>(value[i++]);
+    if (first < min || first > max) {
+      return false;
+    }
+    for (std::size_t j = 1; j < length; ++j) {
+      const auto byte = static_cast<unsigned char>(value[i++]);
+      if (byte < 0x80 || byte > 0xbf) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 void append_json_string(SecureString &out, std::string_view value) {
@@ -204,10 +233,34 @@ bool valid_docker_server(std::string_view server) {
   if (server.empty() || server.size() > 2048) {
     return false;
   }
-  return std::all_of(server.begin(), server.end(), [](unsigned char c) {
-    return c > 0x20 && c < 0x7f && c != '[' && c != ']' && c != '"' &&
-           c != '\\' && c != '#' && c != ';';
-  });
+  if (!std::all_of(server.begin(), server.end(), [](unsigned char c) {
+        return c > 0x20 && c < 0x7f && c != '"' && c != '\\' && c != '#' &&
+               c != ';';
+      })) {
+    return false;
+  }
+
+  const auto bracket = server.find_first_of("[]");
+  if (bracket == std::string_view::npos) {
+    return true;
+  }
+  const auto address = strip_scheme(server);
+  const auto host = address.substr(0, address.find('/'));
+  const auto close = host.find(']');
+  if (!host.starts_with('[') || close == std::string_view::npos ||
+      address.find_first_of("[]", close + 1) != std::string_view::npos) {
+    return false;
+  }
+  const std::string literal(host.substr(1, close - 1));
+  struct in6_addr ipv6{};
+  if (::inet_pton(AF_INET6, literal.c_str(), &ipv6) != 1) {
+    return false;
+  }
+  const auto port = host.substr(close + 1);
+  return port.empty() || (port.starts_with(':') && port.size() > 1 &&
+                          std::all_of(port.begin() + 1, port.end(), [](char c) {
+                            return c >= '0' && c <= '9';
+                          }));
 }
 
 std::vector<std::string> docker_server_aliases(std::string_view server) {
@@ -245,8 +298,28 @@ std::vector<std::string> docker_server_aliases(std::string_view server) {
 std::vector<std::string> docker_config_sections(std::string_view server) {
   std::vector<std::string> sections;
   for (const auto &alias : docker_server_aliases(server)) {
-    std::string section = "docker:";
-    section.append(alias);
+    if (alias.find('[') == std::string::npos) {
+      sections.push_back("docker:" + alias);
+      continue;
+    }
+    // Use a separate prefix so existing literal percent escapes in docker:
+    // sections cannot collide with encoded IPv6 addresses.
+    std::string section = "docker-ipv6:";
+    for (const char c : alias) {
+      switch (c) {
+      case '[':
+        section.append("%5B");
+        break;
+      case ']':
+        section.append("%5D");
+        break;
+      case '%':
+        section.append("%25");
+        break;
+      default:
+        section.push_back(c);
+      }
+    }
     sections.push_back(std::move(section));
   }
   return sections;

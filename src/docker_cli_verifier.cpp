@@ -161,8 +161,9 @@ SecurityVerdict verify_docker_home(std::string_view environment) {
                            "cannot determine Docker CLI home");
   }
 
-  const auto trusted_home =
-      Security::trusted_directory(std::filesystem::path(*home));
+  // Docker joins the config path lexically, before following any symlinks.
+  const auto trusted_home = Security::trusted_directory(
+      std::filesystem::path(*home).lexically_normal());
   if (!trusted_home) {
     return SecurityVerdict(
         std::errc::permission_denied,
@@ -212,15 +213,21 @@ struct MapEntry {
 std::optional<MapEntry> parse_map_line(std::string_view line) {
   std::size_t pos = 0;
   std::string_view fields[5];
-  for (auto &field : fields) {
+  for (std::size_t i = 0; i < std::size(fields); ++i) {
     while (pos < line.size() && line[pos] == ' ') {
       ++pos;
     }
-    const auto end = line.find(' ', pos);
-    if (pos >= line.size() || end == std::string_view::npos) {
+    auto end = line.find(' ', pos);
+    if (pos >= line.size()) {
       return std::nullopt;
     }
-    field = line.substr(pos, end - pos);
+    if (end == std::string_view::npos) {
+      if (i != std::size(fields) - 1) {
+        return std::nullopt;
+      }
+      end = line.size();
+    }
+    fields[i] = line.substr(pos, end - pos);
     pos = end;
   }
   while (pos < line.size() && line[pos] == ' ') {
@@ -309,14 +316,16 @@ DockerCliVerifier::forbidden_arguments(const std::vector<std::string> &args) {
       }
       continue;
     }
-    // -l takes the log level, which cannot redirect anything. Any c, H, or D
-    // in a short-option cluster selects a context, daemon host, or debug.
-    if (arg == "-l") {
-      ++i;
-      continue;
-    }
-    if (arg.find_first_of("cHD") != std::string_view::npos) {
-      return args[i];
+    // -l consumes the rest of the cluster or the next argument as its value.
+    // Reject c, H, or D only if they occur before that value.
+    const auto flag = arg.find_first_of("lcHD", 1);
+    if (flag != std::string_view::npos) {
+      if (arg[flag] != 'l') {
+        return args[i];
+      }
+      if (flag + 1 == arg.size()) {
+        ++i;
+      }
     }
   }
   return std::nullopt;

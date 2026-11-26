@@ -133,9 +133,25 @@ So `[docker:ghcr.io]` covers both `ghcr.io` and
 `https://ghcr.io/v2/`. The exact spelling, when present, wins over a
 host-only section.
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:eccc24095895bb18ab431bbf0e1552b9a450c19992293c494789ce479db2dbea -->
+
 Docker Hub is sent as `https://index.docker.io/v1/`. One section using any of
 `docker.io`, `index.docker.io`, `registry-1.docker.io`, or the full URL covers
 all of its spellings. Use one of them, not several.
+
+For a bracketed IPv6 registry such as `[2001:db8::1]:5000`, use a
+`docker-ipv6:` section. Write `[` as `%5B`, `]` as `%5D`, and any
+literal `%` as `%25`. Keep the original address in Docker's `credHelpers`
+configuration and in the signer policy.
+
+```ini
+[docker-ipv6:%5B2001:db8::1%5D:5000]
+gpgfile=~/.docker/private.credentials.gpg
+```
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ### 3. Configure the Docker CLI
 
@@ -372,11 +388,23 @@ writes nothing if a signal arrived in between.
 
 ## Threat model
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:46e5eff102a2eb418b77a0b2f0554bbae5b7201f312fe64d8779453a1c7fd1ea -->
+
 The helper decides which *program* receives your credentials: the genuine,
 unmodified Docker CLI that you installed, started in a clean environment with
 configuration only root can change, with your encrypted file unaltered (when
 signing is on). It is designed to refuse look-alike binaries, redirected
 daemons, injected libraries, and replaced files.
+
+This assumes that the `docker-credential-methuselah` entry point, the
+Methuselah executable it resolves to, and every directory on those
+installation paths are owned by root and cannot be changed by other users.
+The verifier checks that the helper and Docker share a filesystem root and
+mount namespace; it does not check the helper's own installation ownership.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 It does not stop everything. A process running as you that is allowed to
 `ptrace` the CLI can read or rewrite its memory, so the Yama requirement in
@@ -406,8 +434,14 @@ registry and the CLI configuration fixed.
 - `--context` and `DOCKER_CONTEXT` are refused. Only the default context, or a
   root-provisioned `currentContext`, is available. `DOCKER_HOST` is refused,
   so rootless daemons that depend on it need a root-provisioned context.
-- Registry addresses must be printable ASCII without `[`, `]`, `"`, `\`, `#`,
-  or `;`, so bracketed IPv6 registry literals are not supported.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:aae59d8080361490898bc94c1d9e8c28707e3c0f4071d0a42fcea889deb9a0bf -->
+
+- Registry addresses must be printable ASCII without `"`, `\`, `#`, or `;`.
+  Brackets are allowed only around a valid IPv6 registry host.
+
+<!-- /coderabbit-ai-generated:v1 -->
 - The pin covers the `docker` executable. Ownership and memory-map checks
   cover the rest of the install directory.
 - The `methuselah` account can replace its own Docker CLI files. That is the

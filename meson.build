@@ -188,6 +188,7 @@ unit_tests = executable(
         'src/aws_credentials.cpp',
         'src/aws_cli_verifier.cpp',
         'src/aws_signers.cpp',
+        'src/docker_cli_verifier.cpp',
         'src/git_helper.cpp',
         'src/process_info.cpp',
         'src/security.cpp',

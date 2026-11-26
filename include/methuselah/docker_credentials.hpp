@@ -83,8 +83,8 @@ struct DockerParseResult {
 };
 
 // A Docker registry server address as the CLI passes it to a credential
-// helper. The address is kept in one line, printable ASCII, and free of the
-// characters that would make an INI section or a JSON document ambiguous.
+// helper. The address is kept in one line of printable ASCII. Brackets are
+// allowed only around an IPv6 host.
 [[nodiscard]] bool valid_docker_server(std::string_view server);
 
 // Candidate names for a server address, most exact first. The CLI's own
@@ -94,8 +94,8 @@ struct DockerParseResult {
 [[nodiscard]] std::vector<std::string>
 docker_server_aliases(std::string_view server);
 
-// Candidate `[docker:<...>]` section names for a server address, in the same
-// order as docker_server_aliases().
+// Candidate `[docker:<...>]` and [docker-ipv6:...] section names, in the same
+// order as docker_server_aliases(). IPv6 aliases encode brackets and percent.
 [[nodiscard]] std::vector<std::string>
 docker_config_sections(std::string_view server);
 

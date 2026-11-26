@@ -22,6 +22,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <fcntl.h>
@@ -108,6 +109,19 @@ void test_credentials() {
   CHECK(DockerCredentials::parse(long_secret).result ==
         std::errc::invalid_argument);
 
+  const auto utf8 = DockerCredentials::parse(
+      "username=caf\xc3\xa9\npassword=tab\t\xe2\x82\xac\xf0\x9f\x94\x91\n");
+  CHECK(utf8.result == std::errc{});
+  CHECK(utf8.credentials.to_credential_helper_json("ghcr.io").find(
+            R"(tab\t)"
+            "\xe2\x82\xac\xf0\x9f\x94\x91") != std::string::npos);
+  for (const char *bad : {"\x80", "\xc0\xaf", "\xe2\x82", "\xe2\x28\xa1",
+                          "\xed\xa0\x80", "\xf4\x90\x80\x80"}) {
+    CHECK(DockerCredentials::parse(std::string("username=alice\npassword=") +
+                                   bad + "\n")
+              .result == std::errc::invalid_argument);
+  }
+
   // Errors must never echo secret values.
   const std::string error = std::string(
       DockerCredentials::parse("username=alice\npassword=bad\x01value\n")
@@ -122,7 +136,14 @@ void test_server_names() {
   CHECK(!valid_docker_server(""));
   CHECK(!valid_docker_server("bad server"));
   CHECK(!valid_docker_server("bad\nserver"));
-  CHECK(!valid_docker_server("bad]server"));
+  CHECK(valid_docker_server("[::1]"));
+  CHECK(valid_docker_server("https://[2001:db8::1]:5000/v2/"));
+  for (const char *bad :
+       {"bad]server", "[::1", "[[::1]]", "[example.com]", "[192.0.2.1]",
+        "[::1]host", "[::1]:", "[::1]:tls", "example.com/[::1]", "[::1]/path]",
+        "[::1]:80[::2]"}) {
+    CHECK(!valid_docker_server(bad));
+  }
   CHECK(!valid_docker_server(std::string(2049, 'a')));
 
   const auto has = [](const std::vector<std::string> &sections,
@@ -142,6 +163,12 @@ void test_server_names() {
   CHECK(ghcr.front() == "docker:https://ghcr.io");
   CHECK(has(ghcr, "docker:ghcr.io"));
   CHECK(!has(ghcr, "docker:docker.io"));
+
+  const auto ipv6 = docker_config_sections("https://[2001:db8::1]:5000/v2%2F/");
+  CHECK(ipv6.front() == "docker-ipv6:https://%5B2001:db8::1%5D:5000/v2%252F/");
+  CHECK(has(ipv6, "docker-ipv6:%5B2001:db8::1%5D:5000"));
+  CHECK(has(docker_config_sections("%5B2001:db8::1%5D:5000"),
+            "docker:%5B2001:db8::1%5D:5000"));
 
   const auto aliases = docker_server_aliases("https://index.docker.io/v1/");
   CHECK(std::find(aliases.begin(), aliases.end(), "docker.io") !=
@@ -183,6 +210,15 @@ void test_signers() {
   CHECK(!S::parse("bad server " + fpr40)); // invalid server
   CHECK(!S::parse("bad]server " + fpr40));
   CHECK(!S::parse(std::string(2049, 'a') + " " + fpr40));
+
+  const auto url_entry = S::parse("https://registry.example.com/v2/ " + fpr64);
+  CHECK(url_entry.has_value());
+  if (url_entry) {
+    CHECK(S::find(*url_entry, "registry.example.com").fingerprint == fpr64);
+  }
+  const S::Entries overlapping = {{"https://index.docker.io/v1/", fpr40},
+                                  {"docker.io", fpr64}};
+  CHECK(S::find(overlapping, "docker.io").fingerprint == fpr40);
 
   // An absent policy file enforces nothing.
   const auto none =
@@ -300,8 +336,10 @@ void test_arguments() {
   // -l takes a value; its value must not be mistaken for the subcommand.
   CHECK(!V::forbidden_arguments({"docker", "-l", "debug", "pull", "alpine"})
              .has_value());
-  CHECK(!V::forbidden_arguments({"docker", "-ldebug", "pull", "alpine"})
+  CHECK(!V::forbidden_arguments({"docker", "-l=DEBUG", "pull", "alpine"})
              .has_value());
+  CHECK(V::forbidden_arguments({"docker", "-lDEBUG", "--host=remote", "pull",
+                                "alpine"}) == "--host=remote");
   CHECK(!V::forbidden_arguments(
              {"docker", "--log-level", "debug", "pull", "alpine"})
              .has_value());
@@ -321,9 +359,8 @@ void test_pin_file_and_hash() {
 
   auto pins = V::parse_pin_file("# docker 27.x\n\n" + d1 +
                                 "  /usr/bin/docker\n" + d2 + "\n");
-  CHECK(pins.has_value());
-  if (pins) {
-    CHECK(pins->size() == 2);
+  CHECK(pins && pins->size() == 2);
+  if (pins && pins->size() == 2) {
     CHECK((*pins)[0] == d1);
     CHECK((*pins)[1] ==
           "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
@@ -335,7 +372,11 @@ void test_pin_file_and_hash() {
   CHECK(!V::parse_pin_file(std::string(64, 'g') + "\n").has_value());
 
   int fds[2];
-  CHECK(::pipe(fds) == 0);
+  const int pipe_result = ::pipe(fds);
+  CHECK(pipe_result == 0);
+  if (pipe_result != 0) {
+    return;
+  }
   CHECK(::write(fds[1], "abc", 3) == 3);
   ::close(fds[1]);
   const auto digest = V::sha256_hex(fds[0]);
@@ -392,6 +433,10 @@ void test_maps() {
         V::UnsafeMapping::file_writable_executable);
   CHECK(V::unsafe_mapping(file_exec + "7f40-7f41 r-xp 00000000 00:00 0 \n") ==
         V::UnsafeMapping::anonymous_executable);
+  CHECK(V::unsafe_mapping("7f40-7f41 r-xp 00000000 00:00 0\n") ==
+        V::UnsafeMapping::anonymous_executable);
+  CHECK(V::unsafe_mapping("7f40-7f41 r-xp 00000000 00:00\n") ==
+        V::UnsafeMapping::none);
   CHECK(V::unsafe_mapping("7f40-7f41 r-xp 00000000 00:01 5  /memfd:evil "
                           "(deleted)\n") == V::UnsafeMapping::none);
 }
@@ -474,7 +519,21 @@ void test_verdict() {
 
 struct Child {
   pid_t pid = -1;
-  ~Child() {
+  Child() = default;
+  Child(const Child &) = delete;
+  Child &operator=(const Child &) = delete;
+  Child(Child &&other) noexcept : pid(std::exchange(other.pid, -1)) {}
+  Child &operator=(Child &&other) noexcept {
+    if (this != &other) {
+      cleanup();
+      pid = std::exchange(other.pid, -1);
+    }
+    return *this;
+  }
+  ~Child() { cleanup(); }
+
+private:
+  void cleanup() const {
     if (pid > 0) {
       ::kill(-pid, SIGKILL);
       ::waitpid(pid, nullptr, 0);
@@ -545,8 +604,8 @@ void test_service_install() {
   options.required_name = sleeper->filename().string();
   options.pin_file = "/nonexistent/methuselah/docker-pin";
 
-  Child child =
-      spawn(sleeper->string(), {"sleep", "10"}, {"HOME=/", "PATH=/usr/bin"});
+  Child child = spawn(sleeper->string(), {"sleep", "10"},
+                      {"HOME=/nonexistent/..", "PATH=/usr/bin"});
   CHECK(wait_for_exec(child.pid, sleeper->string()));
   const auto [result, reason] = DockerCliVerifier(options).verify(child.pid);
   if (result != std::errc{}) {
