@@ -197,3 +197,19 @@ unit_tests = executable(
     install: false,
 )
 test('aws credential helper', unit_tests)
+
+# This integration test uses gpg and gpgconf to create an isolated keyring.
+decrypt_fd_test = executable(
+    'methuselah-decrypt-fd-test',
+    files('src/gpg_decrypt.cpp', 'tests/unit/decrypt_fd_test.cpp'),
+    dependencies: [gpgme_dep, sodium_dep],
+    include_directories: include_directories('include'),
+    cpp_args: ['-Wall', '-Wextra'],
+    build_by_default: false,
+    install: false,
+)
+test(
+    'decrypt fd',
+    find_program('sh'),
+    args: files('tests/unit/decrypt_fd_fixtures.sh') + [decrypt_fd_test],
+)
