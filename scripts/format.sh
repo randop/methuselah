@@ -15,4 +15,12 @@ find include -type f \
   ! -name "*_font.h" \
   -exec clang-format -i {} +
 
-meson format -i meson.build
+find tests -type f \
+  \( -name "*.cpp" -o -name "*.h" -o -name "*.hpp" -o -name "*.c" -o -name "*.cc" \) \
+  -exec clang-format -i {} +
+
+if meson --version | grep -qE '^(1\.(5|[6-9]|[1-9][0-9])|[2-9])'; then
+  meson format -i meson.build
+else
+  echo "Warning: Meson < 1.5.0, skipping format"
+fi
