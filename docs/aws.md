@@ -6,6 +6,14 @@
 helper. Credentials stay GPG-encrypted at rest and are handed over only after
 the calling process has been verified as a genuine AWS CLI v2.
 
+#### Tested on
+```bash
+aws --version
+```
+```
+aws-cli/2.42.1 Python/3.14.10 Linux/6.8.12 exe/x86_64.arch
+```
+
 ## Installation
 
 Run the installer from the repository root as the account that will use the
