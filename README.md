@@ -10,7 +10,7 @@
 ⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪
 ```
 
-Credential helper for Git, GPG, SSH
+Credential helper for Git, GPG, SSH, AWS CLI, and Docker
 
 ---
 
@@ -18,7 +18,7 @@ Credential helper for Git, GPG, SSH
 
 ## Overview
 
-Methuselah is a command-line project focused on credential handling across Git, GPG, and SSH workflows. The project aims to provide a dedicated secure solution for working with credentials in development environments, keeping authentication-related tooling organized and accessible.
+Methuselah is a command-line project focused on credential handling across Git, GPG, SSH, AWS CLI, and Docker workflows. The project aims to provide a dedicated secure solution for working with credentials in development environments, keeping authentication-related tooling organized and accessible.
 
 ## Features
 
@@ -28,10 +28,15 @@ Methuselah is a command-line project focused on credential handling across Git, 
 - **AWS CLI** — `credential_process` helper that releases credentials only to
   an untampered AWS CLI v2 owned by root or the dedicated `methuselah` service
   account.
+- **Docker** — Read-only credential helper for the Docker CLI. Credentials
+  stay GPG-encrypted and are released only to a verified, root-managed Docker
+  CLI.
 
 ---
 For additional build options and instructions, see [BUILD.md](BUILD.md).
 For AWS CLI setup and verification details, see [docs/aws.md](docs/aws.md).
+For Docker credential helper setup and verification details, see
+[docs/docker.md](docs/docker.md).
 
 ## Security
 
