@@ -101,8 +101,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   descriptor and rewinds it for retries, rather than reopening the path. The
   final path component may not be a symlink.
 - The unknown-macro check now runs before the instance lock is taken.
+- Internal clean-up of the AWS helper, with no change to what it accepts or
+  refuses. `AwsCliVerifier::verify()` is split into one function per check
+  (tracer, executable identity, pin, arguments, launch context, memory maps);
+  `AwsCredentials::parse()` is table-driven; one `read_all()`/`read_chunks()`
+  loop, `UniqueFd`, and `strutil` helpers (`include/methuselah/fd_io.hpp`,
+  `text_util.hpp`) replace the per-file copies; `Security::read_trusted_file()`
+  is the single "read a root-owned policy file" routine behind the pin file and
+  the signer policy; `DecryptResult::not_signed()` replaces matching the error
+  text; the redundant `verdict()` wrapper and the hand-written `starts_with`
+  are gone. The instance lock's wait loop is its own function and uses
+  `steady_clock`.
+- `ProcessInfo::cmdline()` now reads through the same bounded reader as
+  `argv()` (4 MiB limit) instead of an unbounded stream.
 
 ### Security
+- The AWS CLI pin file is now read with the same checks as the signer policy:
+  opened with `O_NOFOLLOW`, and the opened descriptor must itself be a regular
+  file owned by root without group or other write access. Previously only the
+  path was vetted before the open.
 - Output is bound to the verified caller: stdout must be a pipe whose read end
   the AWS CLI holds, checked before the prompt and again before writing.
   Sockets and pipes read by anyone else are refused.

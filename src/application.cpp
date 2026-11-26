@@ -6,6 +6,7 @@
 #include "methuselah/aws_credentials.hpp"
 #include "methuselah/aws_signers.hpp"
 #include "methuselah/config.hpp"
+#include "methuselah/fd_io.hpp"
 #include "methuselah/git_credentials.hpp"
 #include "methuselah/gpg_decrypt.hpp"
 #include "methuselah/instance_lock.hpp"
@@ -21,8 +22,6 @@
 
 #include <spdlog/spdlog.h>
 
-#include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -33,7 +32,6 @@
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <utility>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -72,24 +70,39 @@ Macro parse_macro(int argc, char **argv) {
   return Macro::Unknown;
 }
 
-int run_git_flow(const GitPredicate &predicate) {
-  const std::filesystem::path config_path = resolve_path(kConfigFile);
-
-  if (std::filesystem::exists(config_path)) {
-    SPDLOG_TRACE("config path OK: {}", config_path.string());
-  } else {
+// Loads the user's configuration. On failure, says why on stderr and returns
+// nullopt.
+std::optional<Config> load_config(const std::filesystem::path &config_path) {
+  if (!std::filesystem::exists(config_path)) {
     std::cerr << "ERROR(configuration): config path is missing on "
               << config_path.string() << std::endl;
-    return EXIT_FAILURE;
+    return std::nullopt;
   }
+  SPDLOG_TRACE("config path OK: {}", config_path.string());
 
-  Config config;
   try {
-    config = Config::load(config_path);
+    return Config::load(config_path);
   } catch (const std::exception &ex) {
     std::cerr << "Failed to parse config file: " << ex.what() << '\n';
+    return std::nullopt;
+  }
+}
+
+// The interactive flows leave their prompt loop on SIGINT/SIGTERM; note it.
+void log_if_signalled() {
+  if (SignalGuard::received()) {
+    SPDLOG_TRACE("application received signal {}, cleaning up...",
+                 SignalGuard::signum());
+  }
+}
+
+int run_git_flow(const GitPredicate &predicate) {
+  const std::filesystem::path config_path = resolve_path(kConfigFile);
+  const auto config_file = load_config(config_path);
+  if (!config_file) {
     return EXIT_FAILURE;
   }
+  const Config &config = *config_file;
 
   const auto gpg_file = config.gpg_file_for(predicate.host());
   if (!gpg_file) {
@@ -144,10 +157,7 @@ int run_git_flow(const GitPredicate &predicate) {
               << decrypt_result.error() << std::endl;
   }
 
-  if (SignalGuard::received()) {
-    SPDLOG_TRACE("application received signal {}, cleaning up...",
-                 SignalGuard::signum());
-  }
+  log_if_signalled();
 
   return EXIT_SUCCESS;
 }
@@ -170,10 +180,7 @@ int run_dummy() {
     }
   }
 
-  if (SignalGuard::received()) {
-    SPDLOG_TRACE("application received signal {}, cleaning up...",
-                 SignalGuard::signum());
-  }
+  log_if_signalled();
 
   return EXIT_SUCCESS;
 }
@@ -203,44 +210,23 @@ int run_ssh_flow() {
     break;
   }
 
-  if (SignalGuard::received()) {
-    SPDLOG_TRACE("application received signal {}, cleaning up...",
-                 SignalGuard::signum());
-  }
+  log_if_signalled();
 
   return EXIT_SUCCESS;
 }
 
-// Every macro verifies its caller the same way. Returns true, after saying
-// why, when the caller must be refused.
-bool reject_unverified(const char *macro, const SecurityVerdict &verdict) {
+// Every macro verifies its caller the same way. Returns true when the caller
+// passed; otherwise says why on stderr and returns false.
+bool caller_verified(const char *macro, const SecurityVerdict &verdict) {
   if (verdict.passed()) {
-    return false;
+    return true;
   }
   std::cerr << "Error: " << macro << " macro security verification "
             << (verdict.result == std::errc::permission_denied ? "failure"
                                                                : "faulted")
             << ": " << verdict.reason << std::endl;
-  return true;
+  return false;
 }
-
-class CredentialFile {
-public:
-  explicit CredentialFile(const std::filesystem::path &path)
-      : fd_(::open(path.c_str(),
-                   O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)) {}
-  ~CredentialFile() {
-    if (fd_ >= 0) {
-      ::close(fd_);
-    }
-  }
-  CredentialFile(const CredentialFile &) = delete;
-  CredentialFile &operator=(const CredentialFile &) = delete;
-  [[nodiscard]] int get() const { return fd_; }
-
-private:
-  int fd_;
-};
 
 // Anyone who can replace the encrypted file can encrypt their own keys to the
 // user's public key and make the AWS CLI talk to their account instead.
@@ -252,22 +238,13 @@ bool credential_file_is_private(int fd) {
 
 std::optional<std::filesystem::path> aws_gpg_path(const std::string &profile) {
   const std::filesystem::path config_path = resolve_path(kConfigFile);
-  if (!std::filesystem::exists(config_path)) {
-    std::cerr << "ERROR(configuration): config path is missing on "
-              << config_path.string() << std::endl;
-    return std::nullopt;
-  }
-
-  Config config;
-  try {
-    config = Config::load(config_path);
-  } catch (const std::exception &ex) {
-    std::cerr << "Failed to parse config file: " << ex.what() << '\n';
+  const auto config = load_config(config_path);
+  if (!config) {
     return std::nullopt;
   }
 
   const std::string section = "aws:" + profile;
-  const auto gpg_file = config.gpg_file_for(section);
+  const auto gpg_file = config->gpg_file_for(section);
   if (!gpg_file) {
     std::cerr << "ERROR(configuration): no [" << section << "] gpgfile in "
               << config_path.string() << std::endl;
@@ -281,20 +258,28 @@ std::optional<std::filesystem::path> aws_gpg_path(const std::string &profile) {
 // after InstanceLock's longer limit, so an abandoned dialog cannot wedge them.
 constexpr int kUnlockBudgetSeconds = 120;
 
+// What unlock_credentials() is asked to unlock. The caller owns what is being
+// unlocked, so it supplies the dialog title, as the other flows do.
+struct UnlockRequest {
+  int fd;                            // encrypted file, rewound per attempt
+  const std::filesystem::path &file; // only used in messages
+  std::string_view required_signer;  // empty: no signature required
+  std::string_view title;            // passphrase dialog title
+};
+
 // Reuses an unlocked gpg-agent when possible, otherwise asks for the
 // passphrase. Unlike the git flow, cancelling is a failure: the CLI must not
-// see an empty, "successful" reply. The caller owns what is being unlocked, so
-// it supplies the dialog title, as the other flows do.
-std::optional<DecryptResult>
-unlock_credentials(const GpgDecryptor &decryptor, int fd,
-                   const std::filesystem::path &file,
-                   std::string_view required_signer, std::string title) {
-  auto remembered = decryptor.decrypt_fd(fd, SecureString{}, required_signer);
+// see an empty, "successful" reply.
+std::optional<DecryptResult> unlock_credentials(const GpgDecryptor &decryptor,
+                                                const UnlockRequest &request) {
+  auto remembered =
+      decryptor.decrypt_fd(request.fd, SecureString{}, request.required_signer);
   if (remembered.ok()) {
     return remembered;
   }
-  if (remembered.error() == GpgDecryptor::kNotSignedError) {
-    std::cerr << "ERROR: " << file << ": " << remembered.error() << std::endl;
+  if (remembered.not_signed()) {
+    std::cerr << "ERROR: " << request.file << ": " << remembered.error()
+              << std::endl;
     return std::nullopt;
   }
 
@@ -305,7 +290,7 @@ unlock_credentials(const GpgDecryptor &decryptor, int fd,
   }
 
   PromptOptions options;
-  options.title = std::move(title);
+  options.title = std::string(request.title);
   options.message = kDefaultMessage;
 
   const auto deadline = std::chrono::steady_clock::now() +
@@ -321,18 +306,32 @@ unlock_credentials(const GpgDecryptor &decryptor, int fd,
     if (!password) {
       break;
     }
-    auto result = decryptor.decrypt_fd(fd, *password, required_signer);
+    auto result =
+        decryptor.decrypt_fd(request.fd, *password, request.required_signer);
     secure_clear(*password);
     if (result.ok()) {
       return result;
     }
-    std::cerr << "ERROR: credential decryption issue on " << file << ": "
-              << result.error() << std::endl;
-    if (result.error() == GpgDecryptor::kNotSignedError) {
+    std::cerr << "ERROR: credential decryption issue on " << request.file
+              << ": " << result.error() << std::endl;
+    if (result.not_signed()) {
       break;
     }
   }
   return std::nullopt;
+}
+
+// The passphrase prompt can stay open for a long time. Make sure the process
+// that is about to receive the secrets is still the verified AWS CLI.
+bool caller_still_trusted(pid_t caller, const Security &security) {
+  if (ProcessInfo::parent() != caller) {
+    std::cerr << "Error: aws caller changed while unlocking credentials"
+              << std::endl;
+    return false;
+  }
+  return caller_verified("aws", security.verify_aws(caller)) &&
+         caller_verified("aws", AwsCliVerifier::verify_output_channel(
+                                    caller, STDOUT_FILENO));
 }
 
 int run_aws_flow(const std::string &profile, pid_t caller,
@@ -344,8 +343,8 @@ int run_aws_flow(const std::string &profile, pid_t caller,
 
   // Check that the verified CLI holds a read end and that no other reader
   // is visible in /proc at this point. This cannot guarantee exclusive access.
-  if (reject_unverified("aws", AwsCliVerifier::verify_output_channel(
-                                   caller, STDOUT_FILENO))) {
+  if (!caller_verified("aws", AwsCliVerifier::verify_output_channel(
+                                  caller, STDOUT_FILENO))) {
     return EXIT_FAILURE;
   }
 
@@ -359,7 +358,8 @@ int run_aws_flow(const std::string &profile, pid_t caller,
   if (!gpg_path) {
     return EXIT_FAILURE;
   }
-  const CredentialFile file(*gpg_path);
+  const UniqueFd file(::open(gpg_path->c_str(),
+                             O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK));
   if (!credential_file_is_private(file.get()) ||
       ::fcntl(file.get(), F_SETFL, 0) == -1) {
     std::cerr << "Error: " << gpg_path->string()
@@ -370,8 +370,9 @@ int run_aws_flow(const std::string &profile, pid_t caller,
   }
 
   GpgDecryptor decryptor;
-  auto unlocked = unlock_credentials(decryptor, file.get(), *gpg_path,
-                                     signer.fingerprint, "aws credentials");
+  auto unlocked =
+      unlock_credentials(decryptor, {file.get(), *gpg_path, signer.fingerprint,
+                                     "aws credentials"});
   if (!unlocked) {
     std::cerr << "Error: could not unlock aws credentials for profile "
               << profile << std::endl;
@@ -385,19 +386,7 @@ int run_aws_flow(const std::string &profile, pid_t caller,
     return EXIT_FAILURE;
   }
 
-  // The prompt can stay open for a long time. Make sure the process that is
-  // about to receive the secrets is still the verified AWS CLI.
-  if (ProcessInfo::parent() != caller) {
-    std::cerr << "Error: aws caller changed while unlocking credentials"
-              << std::endl;
-    return EXIT_FAILURE;
-  }
-  if (reject_unverified("aws", security.verify_aws(caller)) ||
-      reject_unverified("aws", AwsCliVerifier::verify_output_channel(
-                                   caller, STDOUT_FILENO))) {
-    return EXIT_FAILURE;
-  }
-  if (SignalGuard::received()) {
+  if (!caller_still_trusted(caller, security) || SignalGuard::received()) {
     return EXIT_FAILURE;
   }
 
@@ -406,6 +395,47 @@ int run_aws_flow(const std::string &profile, pid_t caller,
   const bool written = secure_write(STDOUT_FILENO, json);
   secure_clear(json);
   return written ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+// One entry point per macro: verify the caller, then run the flow.
+int run_gpg_macro(const Security &security) {
+  SPDLOG_TRACE("gpg security verification...");
+  const auto verdict = security.verify_gpg();
+
+  SPDLOG_TRACE("gpg security verification result");
+  if (!caller_verified("gpg", verdict)) {
+    return EXIT_FAILURE;
+  }
+
+  PinentryServer server("gpg credentials", kDefaultMessage);
+  return server.run();
+}
+
+int run_git_macro(int argc, char **argv, const Security &security) {
+  // Git also invokes helpers for "store" and "erase"; only "get" is served.
+  if (argc < 3 || std::strcmp(argv[2], "get") != 0) {
+    return EXIT_SUCCESS;
+  }
+  if (!caller_verified("git", security.verify_git())) {
+    return EXIT_FAILURE;
+  }
+  return run_git_flow(GitPredicate::read_from_stdin());
+}
+
+int run_aws_macro(int argc, char **argv, const Security &security) {
+  const pid_t caller = ProcessInfo::parent();
+  if (!caller_verified("aws", security.verify_aws(caller))) {
+    return EXIT_FAILURE;
+  }
+  const std::string profile = argc >= 3 ? argv[2] : "default";
+  return run_aws_flow(profile, caller, security);
+}
+
+int run_ssh_macro(const Security &security) {
+  if (!caller_verified("ssh", security.verify_ssh())) {
+    return EXIT_FAILURE;
+  }
+  return run_ssh_flow();
 }
 
 } // namespace
@@ -440,42 +470,19 @@ int Application::run(int argc, char **argv) {
     return EXIT_SUCCESS;
   }
 
-  if (macro == Macro::Git && (argc < 3 || std::strcmp(argv[2], "get") != 0)) {
-    return EXIT_SUCCESS;
-  } else if (macro == Macro::Gpg) {
-    SPDLOG_TRACE("gpg security verification...");
-    const auto verdict = security.verify_gpg();
-
-    SPDLOG_TRACE("gpg security verification result");
-    if (reject_unverified("gpg", verdict)) {
-      return EXIT_FAILURE;
-    }
-
-    PinentryServer server("gpg credentials", kDefaultMessage);
-    return server.run();
-  } else if (macro == Macro::Git) {
-    if (reject_unverified("git", security.verify_git())) {
-      return EXIT_FAILURE;
-    }
-
-    const GitPredicate predicate = GitPredicate::read_from_stdin();
-    return run_git_flow(predicate);
-  } else if (macro == Macro::Aws) {
-    const pid_t caller = ProcessInfo::parent();
-    if (reject_unverified("aws", security.verify_aws(caller))) {
-      return EXIT_FAILURE;
-    }
-
-    const std::string profile = argc >= 3 ? argv[2] : "default";
-    return run_aws_flow(profile, caller, security);
-  } else if (macro == Macro::Dummy) {
+  switch (macro) {
+  case Macro::Gpg:
+    return run_gpg_macro(security);
+  case Macro::Git:
+    return run_git_macro(argc, argv, security);
+  case Macro::Aws:
+    return run_aws_macro(argc, argv, security);
+  case Macro::Dummy:
     return run_dummy();
-  } else if (macro == Macro::Ssh) {
-    if (reject_unverified("ssh", security.verify_ssh())) {
-      return EXIT_FAILURE;
-    }
-
-    return run_ssh_flow();
+  case Macro::Ssh:
+    return run_ssh_macro(security);
+  case Macro::Unknown:
+    break; // rejected above, before the lock was taken
   }
   return EXIT_FAILURE;
 }

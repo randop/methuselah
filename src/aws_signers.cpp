@@ -1,45 +1,24 @@
 #include "methuselah/aws_signers.hpp"
 
 #include "methuselah/security.hpp"
+#include "methuselah/text_util.hpp"
 
 #include <algorithm>
 #include <cctype>
-#include <cerrno>
-
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 namespace methuselah {
 namespace {
 
 constexpr std::size_t kMaxFileBytes = 1U << 16;
+constexpr std::size_t kMaxProfileNameLength = 64;
+// OpenPGP fingerprints: 40 hex digits (SHA-1, v4 keys) or 64 (SHA-256, v5/v6).
+constexpr std::size_t kSha1FingerprintLength = 40;
+constexpr std::size_t kSha256FingerprintLength = 64;
 
 bool is_fingerprint(std::string_view text) {
-  return (text.size() == 40 || text.size() == 64) &&
-         std::all_of(text.begin(), text.end(),
-                     [](unsigned char c) { return std::isxdigit(c) != 0; });
-}
-
-std::string upper(std::string_view text) {
-  std::string out(text.size(), '\0');
-  for (std::size_t i = 0; i < text.size(); ++i) {
-    out[i] =
-        static_cast<char>(std::toupper(static_cast<unsigned char>(text[i])));
-  }
-  return out;
-}
-
-std::string_view trim(std::string_view line) {
-  while (!line.empty() &&
-         std::isspace(static_cast<unsigned char>(line.front())) != 0) {
-    line.remove_prefix(1);
-  }
-  while (!line.empty() &&
-         std::isspace(static_cast<unsigned char>(line.back())) != 0) {
-    line.remove_suffix(1);
-  }
-  return line;
+  return (text.size() == kSha1FingerprintLength ||
+          text.size() == kSha256FingerprintLength) &&
+         strutil::is_hex(text);
 }
 
 } // namespace
@@ -49,7 +28,7 @@ std::filesystem::path AwsSigners::default_file() {
 }
 
 bool AwsSigners::valid_profile_name(std::string_view name) {
-  return !name.empty() && name.size() <= 64 &&
+  return !name.empty() && name.size() <= kMaxProfileNameLength &&
          std::all_of(name.begin(), name.end(), [](unsigned char c) {
            return std::isalnum(c) != 0 || c == '_' || c == '-' || c == '.' ||
                   c == '@';
@@ -59,10 +38,7 @@ bool AwsSigners::valid_profile_name(std::string_view name) {
 std::optional<AwsSigners::Entries> AwsSigners::parse(std::string_view text) {
   Entries entries;
   while (!text.empty()) {
-    const auto nl = text.find('\n');
-    const std::string_view line = trim(text.substr(0, nl));
-    text =
-        nl == std::string_view::npos ? std::string_view{} : text.substr(nl + 1);
+    const std::string_view line = strutil::trim(strutil::next_line(text));
     if (line.empty() || line.front() == '#') {
       continue;
     }
@@ -71,7 +47,7 @@ std::optional<AwsSigners::Entries> AwsSigners::parse(std::string_view text) {
       return std::nullopt;
     }
     const std::string_view profile = line.substr(0, space);
-    const std::string_view fingerprint = trim(line.substr(space));
+    const std::string_view fingerprint = strutil::trim(line.substr(space));
     if (!valid_profile_name(profile) || !is_fingerprint(fingerprint)) {
       return std::nullopt;
     }
@@ -81,7 +57,8 @@ std::optional<AwsSigners::Entries> AwsSigners::parse(std::string_view text) {
     if (duplicate) {
       return std::nullopt;
     }
-    entries.emplace_back(std::string(profile), upper(fingerprint));
+    entries.emplace_back(std::string(profile),
+                         strutil::ascii_upper(fingerprint));
   }
   return entries;
 }
@@ -98,49 +75,27 @@ AwsSigners::Lookup AwsSigners::find(const Entries &entries,
 
 AwsSigners::Lookup AwsSigners::load(const std::filesystem::path &file,
                                     std::string_view profile) {
-  struct stat link{};
-  if (::lstat(file.c_str(), &link) != 0) {
-    if (errno == ENOENT) {
-      return {std::errc{}, "ok", {}};
-    }
+  using Status = TrustedFileContent::Status;
+  const TrustedFileContent policy =
+      Security::read_trusted_file(file, kMaxFileBytes);
+  switch (policy.status) {
+  case Status::ok:
+    break;
+  case Status::absent:
+    return {std::errc{}, "ok", {}}; // no policy file: no signature required
+  case Status::cannot_inspect:
     return {std::errc::io_error, "cannot inspect AWS signer policy", {}};
-  }
-  const auto trusted = Security::trusted_file(file);
-  if (!trusted) {
+  case Status::untrusted:
     return {std::errc::io_error, "AWS signer policy is not root-owned", {}};
-  }
-  const int fd = ::open(trusted->c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-  if (fd < 0) {
+  case Status::cannot_open:
     return {std::errc::io_error, "cannot open AWS signer policy", {}};
-  }
-  // The path was vetted above; vet what was actually opened as well.
-  struct stat info{};
-  if (::fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_uid != 0 ||
-      (info.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
-    ::close(fd);
-    return {std::errc::io_error, "AWS signer policy is not root-owned", {}};
-  }
-  std::string text;
-  char buffer[1024];
-  ssize_t n = 0;
-  for (;;) {
-    n = ::read(fd, buffer, sizeof(buffer));
-    if (n < 0 && errno == EINTR) {
-      continue;
-    }
-    if (n <= 0 || static_cast<std::size_t>(n) > kMaxFileBytes - text.size()) {
-      break;
-    }
-    text.append(buffer, static_cast<std::size_t>(n));
-  }
-  ::close(fd);
-  if (n < 0) {
+  case Status::cannot_read:
     return {std::errc::io_error, "cannot read AWS signer policy", {}};
-  }
-  if (n > 0) {
+  case Status::too_large:
     return {std::errc::io_error, "AWS signer policy is too large", {}};
   }
-  const auto entries = parse(text);
+
+  const auto entries = parse(policy.data);
   if (!entries) {
     return {std::errc::io_error, "AWS signer policy is malformed", {}};
   }

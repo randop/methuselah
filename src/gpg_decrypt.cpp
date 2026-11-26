@@ -1,6 +1,7 @@
 #include "methuselah/gpg_decrypt.hpp"
 
-#include <cctype>
+#include "methuselah/text_util.hpp"
+
 #include <cerrno>
 #include <gpgme.h>
 #include <string>
@@ -88,20 +89,7 @@ private:
 };
 
 bool same_fingerprint(const char *actual, std::string_view required) {
-  if (actual == nullptr) {
-    return false;
-  }
-  const std::string_view have(actual);
-  if (have.size() != required.size()) {
-    return false;
-  }
-  for (std::size_t i = 0; i < have.size(); ++i) {
-    if (std::toupper(static_cast<unsigned char>(have[i])) !=
-        std::toupper(static_cast<unsigned char>(required[i]))) {
-      return false;
-    }
-  }
-  return true;
+  return actual != nullptr && strutil::ascii_iequals(actual, required);
 }
 
 // True only when every signature on the message is good and at least one is
@@ -183,7 +171,8 @@ DecryptResult decrypt(const SecureString &passphrase, OpenCipher open_cipher,
     return result;
   }
   if (verify && !signed_by(ctx.get(), required_signer)) {
-    result.set_error(GpgDecryptor::kNotSignedError);
+    result.set_error(GpgDecryptor::kNotSignedError,
+                     DecryptResult::Failure::not_signed);
     return result;
   }
 

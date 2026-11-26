@@ -2,6 +2,7 @@
 
 #include "methuselah/secure_memory.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -11,6 +12,15 @@ namespace methuselah {
 
 class DecryptResult {
 public:
+  // Why a decryption failed, for callers that must react differently without
+  // matching on the message text.
+  enum class Failure : std::uint8_t {
+    generic,
+    // Decryption worked but the message lacks the required signature, so
+    // retrying with another passphrase cannot help.
+    not_signed,
+  };
+
   DecryptResult() = default;
   ~DecryptResult() { secure_clear(plaintext_); }
 
@@ -19,7 +29,7 @@ public:
 
   DecryptResult(DecryptResult &&other) noexcept
       : plaintext_(std::move(other.plaintext_)),
-        error_(std::move(other.error_)) {
+        error_(std::move(other.error_)), failure_(other.failure_) {
     other.plaintext_.clear();
   }
 
@@ -28,29 +38,37 @@ public:
       secure_clear(plaintext_);
       plaintext_ = std::move(other.plaintext_);
       error_ = std::move(other.error_);
+      failure_ = other.failure_;
       other.plaintext_.clear();
     }
     return *this;
   }
 
   void set_plaintext(SecureString text) { plaintext_ = std::move(text); }
-  void set_error(std::string err) { error_ = std::move(err); }
+  void set_error(std::string err, Failure failure = Failure::generic) {
+    error_ = std::move(err);
+    failure_ = failure;
+  }
 
   [[nodiscard]] bool ok() const noexcept { return error_.empty(); }
   [[nodiscard]] const SecureString &plaintext() const noexcept {
     return plaintext_;
   }
   [[nodiscard]] const std::string &error() const noexcept { return error_; }
+  [[nodiscard]] bool not_signed() const noexcept {
+    return failure_ == Failure::not_signed;
+  }
 
 private:
   SecureString plaintext_;
   std::string error_;
+  Failure failure_ = Failure::generic;
 };
 
 class GpgDecryptor {
 public:
-  // Error text of a decryption that worked but lacked the required signature.
-  // Retrying with another passphrase cannot fix it.
+  // Error text of a decryption that worked but lacked the required signature
+  // (reported as DecryptResult::Failure::not_signed).
   static constexpr const char *kNotSignedError =
       "credentials are not signed by the required key";
 

@@ -7,8 +7,11 @@
 #include "methuselah/aws_cli_verifier.hpp"
 #include "methuselah/aws_credentials.hpp"
 #include "methuselah/aws_signers.hpp"
+#include "methuselah/fd_io.hpp"
+#include "methuselah/gpg_decrypt.hpp"
 #include "methuselah/process_info.hpp"
 #include "methuselah/security.hpp"
+#include "methuselah/text_util.hpp"
 
 #include <sodium.h>
 
@@ -28,6 +31,7 @@
 
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/ptrace.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -1046,6 +1050,247 @@ void test_verify() {
 
 } // namespace
 
+void test_text_util() {
+  using namespace methuselah::strutil;
+  CHECK(trim("  a b \t\r\n") == "a b");
+  CHECK(trim("   ").empty());
+  CHECK(trim("").empty());
+  CHECK(trim("x") == "x");
+
+  // next_line visits every line, including a last one without a newline and
+  // empty lines in between, and leaves the rest in place.
+  std::string_view text = "one\n\ntwo\nthree";
+  CHECK(next_line(text) == "one");
+  CHECK(text == "\ntwo\nthree");
+  CHECK(next_line(text).empty());
+  CHECK(next_line(text) == "two");
+  CHECK(next_line(text) == "three");
+  CHECK(text.empty());
+  std::string_view trailing = "a\n";
+  CHECK(next_line(trailing) == "a");
+  CHECK(trailing.empty());
+
+  CHECK(is_hex("0123456789abcdefABCDEF"));
+  CHECK(is_hex(""));
+  CHECK(!is_hex("12g4"));
+  CHECK(!is_hex("12 4"));
+
+  CHECK(ascii_upper("aBc-1z") == "ABC-1Z");
+  CHECK(ascii_lower("aBc-1Z") == "abc-1z");
+  // Bytes outside ASCII are never altered, whatever the locale says.
+  CHECK(ascii_upper("\xe9") == "\xe9");
+  CHECK(ascii_lower("\xc9") == "\xc9");
+  CHECK(ascii_iequals("OfF", "off"));
+  CHECK(ascii_iequals("off", "OFF"));
+  CHECK(!ascii_iequals("of", "off"));
+  CHECK(!ascii_iequals("offf", "off"));
+  CHECK(ascii_iequals("", ""));
+}
+
+void test_fd_io() {
+  // UniqueFd closes on destruction and on reset, and moves ownership.
+  int raw = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+  CHECK(raw >= 0);
+  {
+    UniqueFd fd(raw);
+    CHECK(fd.valid() && fd.get() == raw);
+    UniqueFd moved(std::move(fd));
+    CHECK(!fd.valid() && moved.get() == raw);
+  }
+  CHECK(::fcntl(raw, F_GETFD) == -1 && errno == EBADF);
+  UniqueFd none;
+  CHECK(!none.valid());
+  CHECK(none.release() == -1);
+
+  // read_all: an exact fit is accepted, one byte more is too large.
+  char path[] = "/tmp/methuselah-fdio-XXXXXX";
+  const int tmp = ::mkstemp(path);
+  CHECK(tmp >= 0);
+  const std::string payload(10000, 'x'); // spans several internal chunks
+  CHECK(::write(tmp, payload.data(), payload.size()) ==
+        static_cast<ssize_t>(payload.size()));
+
+  const auto read_with_limit = [&](std::size_t limit) {
+    CHECK(::lseek(tmp, 0, SEEK_SET) == 0);
+    return read_all(tmp, limit);
+  };
+  const auto exact = read_with_limit(payload.size());
+  CHECK(exact.status == ReadStatus::ok && exact.data == payload);
+  const auto over = read_with_limit(payload.size() - 1);
+  CHECK(over.status == ReadStatus::too_large);
+  const auto roomy = read_with_limit(1U << 20);
+  CHECK(roomy.status == ReadStatus::ok && roomy.data.size() == payload.size());
+
+  // read_chunks streams without accumulating, so a sink can stop early.
+  CHECK(::lseek(tmp, 0, SEEK_SET) == 0);
+  std::size_t seen = 0;
+  CHECK(read_chunks(tmp, [&](const char *, std::size_t n) {
+          seen += n;
+          return true;
+        }) == ReadStatus::ok);
+  CHECK(seen == payload.size());
+  CHECK(::lseek(tmp, 0, SEEK_SET) == 0);
+  CHECK(read_chunks(tmp, [](const char *, std::size_t) { return false; }) ==
+        ReadStatus::too_large);
+
+  ::close(tmp);
+  ::unlink(path);
+  CHECK(read_all(-1, 10).status == ReadStatus::io_error);
+}
+
+void test_read_trusted_file() {
+  using Status = TrustedFileContent::Status;
+  const auto status_of = [](const std::filesystem::path &file,
+                            std::size_t max = 1024,
+                            const TrustPolicy &policy = {}) {
+    return Security::read_trusted_file(file, max, policy).status;
+  };
+
+  CHECK(status_of("/etc/does-not-exist-methuselah") == Status::absent);
+  // ENOTDIR is "cannot inspect", not "absent": a missing policy file means no
+  // policy, a broken path must not.
+  CHECK(status_of("/dev/null/x") == Status::cannot_inspect);
+  // Under a world-writable directory a file is never trusted.
+  char dir[] = "/tmp/methuselah-trusted-read-XXXXXX";
+  CHECK(::mkdtemp(dir) != nullptr);
+  const std::string file = std::string(dir) + "/policy";
+  std::ofstream(file) << "x";
+  CHECK(status_of(file) == Status::untrusted);
+  ::unlink(file.c_str());
+  ::rmdir(dir);
+
+  // A real root-owned file reads back verbatim.
+  const auto passwd = Security::read_trusted_file("/etc/passwd", 1U << 20);
+  CHECK(passwd.status == Status::ok && !passwd.data.empty());
+  CHECK(status_of("/etc/passwd", 4) == Status::too_large);
+  CHECK(status_of("/etc") == Status::untrusted); // not a regular file
+
+  // The positive cases need a directory chain the policy trusts end to end.
+  namespace fs = std::filesystem;
+  const fs::path base = fs::current_path() / "methuselah-read-trusted";
+  std::error_code ec;
+  fs::remove_all(base, ec);
+  fs::create_directories(base, ec);
+  fs::permissions(base, fs::perms::owner_all, fs::perm_options::replace, ec);
+  TrustPolicy policy;
+  policy.owners = {0, ::geteuid()};
+  if (ec || !Security::trusted_directory(base, policy)) {
+    std::printf("SKIP read_trusted_file: test path has untrusted ancestors\n");
+    fs::remove_all(base, ec);
+    return;
+  }
+  const fs::path policy_file = base / "policy";
+  const auto write = [&](const std::string &content, mode_t mode) {
+    std::ofstream(policy_file, std::ios::trunc) << content;
+    ::chmod(policy_file.c_str(), mode);
+  };
+
+  write("hello\n", 0644);
+  const auto ok = Security::read_trusted_file(policy_file, 1024, policy);
+  CHECK(ok.status == Status::ok && ok.data == "hello\n");
+  write("", 0644);
+  CHECK(Security::read_trusted_file(policy_file, 1024, policy).status ==
+        Status::ok);
+  write("12345678", 0644);
+  CHECK(status_of(policy_file, 8, policy) == Status::ok); // exact fit
+  CHECK(status_of(policy_file, 7, policy) == Status::too_large);
+  write("x", 0664); // group-writable
+  CHECK(status_of(policy_file, 1024, policy) == Status::untrusted);
+  write("x", 0644);
+  CHECK(status_of(policy_file, 1024) ==
+        (::geteuid() == 0 ? Status::ok : Status::untrusted)); // default: root
+  const fs::path link = base / "link";
+  fs::create_symlink(policy_file, link, ec);
+  CHECK(status_of(link, 1024, policy) == Status::ok); // vetted link target
+  fs::remove_all(base, ec);
+}
+
+void test_decrypt_result() {
+  DecryptResult fresh;
+  CHECK(fresh.ok() && !fresh.not_signed());
+
+  DecryptResult generic;
+  generic.set_error("boom");
+  CHECK(!generic.ok() && !generic.not_signed() && generic.error() == "boom");
+
+  DecryptResult unsigned_result;
+  unsigned_result.set_error(GpgDecryptor::kNotSignedError,
+                            DecryptResult::Failure::not_signed);
+  CHECK(!unsigned_result.ok() && unsigned_result.not_signed());
+
+  // The reason survives moves; it must never be inferred from message text.
+  DecryptResult moved(std::move(unsigned_result));
+  CHECK(moved.not_signed() && moved.error() == GpgDecryptor::kNotSignedError);
+  DecryptResult assigned;
+  assigned = std::move(moved);
+  CHECK(assigned.not_signed());
+  DecryptResult same_text_other_reason;
+  same_text_other_reason.set_error(GpgDecryptor::kNotSignedError);
+  CHECK(!same_text_other_reason.not_signed());
+  assigned = std::move(generic);
+  CHECK(!assigned.not_signed() && assigned.error() == "boom");
+}
+
+void test_process_info_readers() {
+  const pid_t self = ::getpid();
+  const auto args = ProcessInfo::argv(self);
+  const auto line = ProcessInfo::cmdline(self);
+  CHECK(args && line && !args->empty());
+  if (args && line) {
+    std::string joined;
+    for (const auto &arg : *args) {
+      joined += (joined.empty() ? "" : " ") + arg;
+    }
+    while (!joined.empty() && joined.back() == ' ') {
+      joined.pop_back();
+    }
+    CHECK(*line == joined); // same bytes, different presentation
+  }
+  CHECK(ProcessInfo::readProc(self, "status").has_value());
+  CHECK(!ProcessInfo::readProc(self, "status", 8).has_value()); // too large
+  CHECK(!ProcessInfo::readProc(self, "no-such-leaf").has_value());
+  CHECK(!ProcessInfo::readProc(999999999, "status").has_value());
+  CHECK(!ProcessInfo::cmdline(999999999).has_value());
+}
+
+void test_traced_caller() {
+  const auto shell = Security::trusted_executable("/bin/sh");
+  if (!shell) {
+    std::printf("SKIP traced caller: /bin/sh is not a root-owned executable\n");
+    return;
+  }
+  const pid_t pid = ::fork();
+  if (pid == 0) {
+    if (::ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) != 0) {
+      ::_exit(100);
+    }
+    ::execl(shell->c_str(), "sh", "-c", "sleep 10",
+            static_cast<char *>(nullptr));
+    ::_exit(101);
+  }
+  int status = 0;
+  if (pid < 0 || ::waitpid(pid, &status, WUNTRACED) != pid ||
+      !WIFSTOPPED(status)) {
+    std::printf("SKIP traced caller: ptrace is not available here\n");
+    if (pid > 0) {
+      ::kill(pid, SIGKILL);
+      ::waitpid(pid, nullptr, 0);
+    }
+    return;
+  }
+
+  AwsCliVerifier::Options options;
+  options.min_ptrace_scope = 0;
+  options.candidates = {"/bin/sh"};
+  options.required_name = shell->filename().string();
+  const auto verdict = AwsCliVerifier(options).verify(pid);
+  CHECK(verdict.result == std::errc::permission_denied);
+  CHECK(verdict.reason == "caller is being traced");
+
+  ::kill(pid, SIGKILL);
+  ::waitpid(pid, nullptr, 0);
+}
+
 int main() {
   if (::sodium_init() < 0) {
     std::fputs("sodium_init failed\n", stderr);
@@ -1070,6 +1315,12 @@ int main() {
   test_verify();
   test_anonymous_exec_waiver();
   test_file_mapping_with_waiver();
+  test_text_util();
+  test_fd_io();
+  test_read_trusted_file();
+  test_decrypt_result();
+  test_process_info_readers();
+  test_traced_caller();
 
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

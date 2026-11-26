@@ -1,6 +1,7 @@
 #include "config.h"
 
 #include "methuselah/aws_cli_verifier.hpp"
+#include "methuselah/fd_io.hpp"
 #include "methuselah/git_helper.hpp"
 #include "methuselah/process_info.hpp"
 #include "methuselah/security.hpp"
@@ -13,7 +14,9 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <utility>
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -27,15 +30,29 @@ void report(const ProcessInfo::Entry &e, const char *label) {
             << "  cmdline: " << e.cmdline << "\n";
 }
 
-} // namespace
-
-namespace {
-
 enum class PathKind { file, executable, directory };
+
+// Symlinks followed while resolving one path before giving up (as the kernel
+// does with ELOOP).
+constexpr unsigned kMaxSymlinks = 40;
 
 bool accepted_owner(const TrustPolicy &policy, uid_t owner) {
   return std::find(policy.owners.begin(), policy.owners.end(), owner) !=
          policy.owners.end();
+}
+
+// Whether the final component has the shape the caller asked for.
+bool has_expected_kind(const struct stat &info, const std::string &path,
+                       PathKind kind) {
+  switch (kind) {
+  case PathKind::directory:
+    return S_ISDIR(info.st_mode);
+  case PathKind::executable:
+    return S_ISREG(info.st_mode) && ::access(path.c_str(), X_OK) == 0;
+  case PathKind::file:
+    return S_ISREG(info.st_mode);
+  }
+  return false;
 }
 
 std::optional<std::filesystem::path>
@@ -76,7 +93,7 @@ trusted_path(const std::filesystem::path &candidate, PathKind kind,
       return std::nullopt;
     }
     if (S_ISLNK(info.st_mode)) {
-      if (++links > 40) {
+      if (++links > kMaxSymlinks) {
         return std::nullopt;
       }
       std::error_code ec;
@@ -99,9 +116,7 @@ trusted_path(const std::filesystem::path &candidate, PathKind kind,
   }
 
   if (::stat(resolved.c_str(), &info) != 0 ||
-      (kind == PathKind::directory ? !S_ISDIR(info.st_mode)
-                                   : !S_ISREG(info.st_mode)) ||
-      (kind == PathKind::executable && ::access(resolved.c_str(), X_OK) != 0)) {
+      !has_expected_kind(info, resolved.string(), kind)) {
     return std::nullopt;
   }
   return resolved;
@@ -125,6 +140,52 @@ std::optional<std::filesystem::path>
 Security::trusted_directory(const std::filesystem::path &candidate,
                             const TrustPolicy &policy) {
   return trusted_path(candidate, PathKind::directory, policy);
+}
+
+TrustedFileContent
+Security::read_trusted_file(const std::filesystem::path &file,
+                            std::size_t max_bytes, const TrustPolicy &policy) {
+  using Status = TrustedFileContent::Status;
+  TrustedFileContent content;
+
+  struct stat link{};
+  if (::lstat(file.c_str(), &link) != 0) {
+    content.status = errno == ENOENT ? Status::absent : Status::cannot_inspect;
+    return content;
+  }
+  const auto trusted = trusted_file(file, policy);
+  if (!trusted) {
+    content.status = Status::untrusted;
+    return content;
+  }
+
+  UniqueFd fd(::open(trusted->c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
+  if (!fd.valid()) {
+    content.status = Status::cannot_open;
+    return content;
+  }
+  struct stat opened{};
+  if (::fstat(fd.get(), &opened) != 0 || !S_ISREG(opened.st_mode) ||
+      !accepted_owner(policy, opened.st_uid) ||
+      (opened.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+    content.status = Status::untrusted;
+    return content;
+  }
+
+  ReadResult read = read_all(fd.get(), max_bytes);
+  switch (read.status) {
+  case ReadStatus::ok:
+    content.status = Status::ok;
+    content.data = std::move(read.data);
+    break;
+  case ReadStatus::io_error:
+    content.status = Status::cannot_read;
+    break;
+  case ReadStatus::too_large:
+    content.status = Status::too_large;
+    break;
+  }
+  return content;
 }
 
 SecurityVerdict Security::verify_git() const {

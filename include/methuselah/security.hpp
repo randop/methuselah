@@ -3,8 +3,10 @@
 #include <sys/types.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <vector>
@@ -48,6 +50,23 @@ struct SecurityVerdict {
   }
 };
 
+// Result of Security::read_trusted_file(). The stage that failed is kept so
+// each caller can word its own error.
+struct TrustedFileContent {
+  enum class Status : std::uint8_t {
+    ok,
+    absent, // the file does not exist (callers decide whether that is fine)
+    cannot_inspect, // lstat failed for another reason
+    untrusted,      // path, owner or mode is not trusted
+    cannot_open,
+    cannot_read,
+    too_large,
+  };
+
+  Status status = Status::cannot_inspect;
+  std::string data; // only meaningful when status == ok
+};
+
 class Security {
 public:
   Security() = default;
@@ -73,6 +92,15 @@ public:
 
   [[nodiscard]] static std::optional<std::filesystem::path>
   trusted_directory(const std::filesystem::path &candidate,
+                    const TrustPolicy &policy = {});
+
+  // Reads a small policy file (pin list, signer list) only if it is trusted:
+  // the path passes trusted_file(), it is opened without following a final
+  // symlink, and the opened descriptor is itself a regular file owned by an
+  // allowed account without group/other write access (so a swap between the
+  // path check and the open is caught). At most `max_bytes` are read.
+  [[nodiscard]] static TrustedFileContent
+  read_trusted_file(const std::filesystem::path &file, std::size_t max_bytes,
                     const TrustPolicy &policy = {});
 
   [[nodiscard]] SecurityVerdict verify_git() const;

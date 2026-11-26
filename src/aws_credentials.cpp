@@ -1,10 +1,14 @@
 #include "methuselah/aws_credentials.hpp"
 
+#include "methuselah/text_util.hpp"
+
 #include <algorithm>
-#include <cctype>
+#include <array>
 #include <cerrno>
 #include <cstddef>
 #include <ctime>
+#include <iterator>
+#include <numeric>
 #include <optional>
 #include <utility>
 
@@ -13,28 +17,12 @@
 namespace methuselah {
 namespace {
 
-std::string_view trim(std::string_view value) {
-  while (!value.empty() &&
-         std::isspace(static_cast<unsigned char>(value.front())) != 0) {
-    value.remove_prefix(1);
-  }
-  while (!value.empty() &&
-         std::isspace(static_cast<unsigned char>(value.back())) != 0) {
-    value.remove_suffix(1);
-  }
-  return value;
-}
-
 // "AWS_Access-Key_ID" -> "accesskeyid".
 std::string normalize_key(std::string_view key) {
-  std::string out;
-  for (const char raw : key) {
-    const auto c = static_cast<unsigned char>(raw);
-    if (c == '_' || c == '-') {
-      continue;
-    }
-    out.push_back(static_cast<char>(std::tolower(c)));
-  }
+  std::string stripped;
+  std::copy_if(key.begin(), key.end(), std::back_inserter(stripped),
+               [](char c) { return c != '_' && c != '-'; });
+  std::string out = strutil::ascii_lower(stripped);
   if (out.starts_with("aws")) {
     out.erase(0, 3);
   }
@@ -58,8 +46,43 @@ constexpr std::string_view kBase64 =
 constexpr std::string_view kToken =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-.";
 
+// One secret field of the credentials file. The array order is the order of
+// AwsCredentials::parse's `slots`, and validation reports problems in this
+// order too.
+struct FieldSpec {
+  std::string_view key; // normalised, see normalize_key()
+  std::string_view charset;
+  std::size_t min_size = 0;
+  std::size_t max_size = 0;
+  std::string_view missing;   // reason when absent or empty; empty: optional
+  std::string_view malformed; // reason when the value has the wrong shape
+};
+
+enum Field : std::size_t { kAccessKeyId, kSecretAccessKey, kSessionToken };
+
+constexpr std::array<FieldSpec, 3> kFields = {{
+    {"accesskeyid", kUpperAlnum, 16, 128,
+     "credentials file has no access_key_id",
+     "access_key_id has an unexpected format"},
+    {"secretaccesskey", kBase64, 20, 128,
+     "credentials file has no secret_access_key",
+     "secret_access_key has an unexpected format"},
+    {"sessiontoken",
+     kToken,
+     16,
+     4096,
+     {},
+     "session_token has an unexpected format"},
+}};
+
+constexpr std::size_t kJsonOverhead = 512;
+
+AwsParseResult invalid(std::string_view reason) {
+  return {std::errc::invalid_argument, reason, {}};
+}
+
 // Strict "YYYY-MM-DDTHH:MM:SSZ". Returns the instant as UTC epoch seconds.
-std::optional<std::time_t> parse_expiration(const std::string &value) {
+std::optional<std::time_t> parse_expiration(std::string_view value) {
   constexpr std::string_view syntax = "dddd-dd-ddTdd:dd:ddZ";
   if (value.size() != syntax.size()) {
     return std::nullopt;
@@ -70,147 +93,135 @@ std::optional<std::time_t> parse_expiration(const std::string &value) {
       return std::nullopt;
     }
   }
+  const auto number = [&](std::size_t pos, std::size_t length) {
+    const std::string_view digits = value.substr(pos, length);
+    return std::accumulate(digits.begin(), digits.end(), 0,
+                           [](int n, char c) { return n * 10 + (c - '0'); });
+  };
   struct tm parts{};
-  const char *end = ::strptime(value.c_str(), "%Y-%m-%dT%H:%M:%SZ", &parts);
-  if (end != value.data() + value.size()) {
-    return std::nullopt;
-  }
-  const auto parsed = parts;
+  parts.tm_year = number(0, 4) - 1900;
+  parts.tm_mon = number(5, 2) - 1;
+  parts.tm_mday = number(8, 2);
+  parts.tm_hour = number(11, 2);
+  parts.tm_min = number(14, 2);
+  parts.tm_sec = number(17, 2);
+
+  // timegm() normalises out-of-range fields (month 13, 30 February, second 60)
+  // instead of failing, so reject anything it had to change.
+  const auto requested = parts;
   errno = 0;
   const auto epoch = ::timegm(&parts);
-  if (errno == EOVERFLOW || parts.tm_year != parsed.tm_year ||
-      parts.tm_mon != parsed.tm_mon || parts.tm_mday != parsed.tm_mday ||
-      parts.tm_hour != parsed.tm_hour || parts.tm_min != parsed.tm_min ||
-      parts.tm_sec != parsed.tm_sec) {
+  if (errno == EOVERFLOW || parts.tm_year != requested.tm_year ||
+      parts.tm_mon != requested.tm_mon || parts.tm_mday != requested.tm_mday ||
+      parts.tm_hour != requested.tm_hour || parts.tm_min != requested.tm_min ||
+      parts.tm_sec != requested.tm_sec) {
     return std::nullopt;
   }
   return epoch;
+}
+
+using FieldSlots = std::array<SecureString *, kFields.size()>;
+
+// Why the secret fields are unusable, or an empty view when they are fine.
+// Problems are reported in table order: everything required first, then the
+// shape of each field that is present.
+std::string_view field_problem(const FieldSlots &slots,
+                               const std::array<bool, kFields.size()> &seen) {
+  for (std::size_t i = 0; i < kFields.size(); ++i) {
+    if (!kFields[i].missing.empty() && slots[i]->empty()) {
+      return kFields[i].missing;
+    }
+  }
+  for (std::size_t i = 0; i < kFields.size(); ++i) {
+    const std::string_view value = *slots[i];
+    const FieldSpec &spec = kFields[i];
+    if (seen[i] &&
+        (value.size() < spec.min_size || value.size() > spec.max_size ||
+         !all_of_set(value, spec.charset))) {
+      return spec.malformed;
+    }
+  }
+  return {};
+}
+
+// Why the expiration is unusable, or an empty view when it is fine.
+std::string_view expiry_problem(std::string_view expiration, bool have_expiry,
+                                bool have_token, std::time_t now) {
+  if (!have_expiry) {
+    // Temporary credentials with no expiry would be cached by the CLI
+    // forever; refuse rather than hand out something that never refreshes.
+    return have_token
+               ? "temporary credentials (session_token) require an expiration"
+               : std::string_view{};
+  }
+  const auto expiry = parse_expiration(expiration);
+  if (!expiry) {
+    return "expiration must look like YYYY-MM-DDTHH:MM:SSZ (UTC)";
+  }
+  if (*expiry <= now) {
+    return "credentials have expired";
+  }
+  if (*expiry - now <= kMinRemainingSeconds) {
+    return "credentials expire in 15 minutes or less; refresh them";
+  }
+  return {};
 }
 
 } // namespace
 
 AwsParseResult AwsCredentials::parse(std::string_view text, std::time_t now) {
   AwsCredentials creds;
-  bool haveAccess = false;
-  bool haveSecret = false;
-  bool haveToken = false;
-  bool haveExpiry = false;
+  // Parsed straight into the wiped-on-destruction members, so no secret is
+  // ever copied into temporary storage that would outlive an error return.
+  const FieldSlots slots = {&creds.access_key_id_, &creds.secret_access_key_,
+                            &creds.session_token_};
+  std::array<bool, kFields.size()> seen{};
+  bool have_expiry = false;
 
   while (!text.empty()) {
-    const auto nl = text.find('\n');
-    std::string_view line = trim(text.substr(0, nl));
-    text =
-        nl == std::string_view::npos ? std::string_view{} : text.substr(nl + 1);
+    const std::string_view line = strutil::trim(strutil::next_line(text));
     if (line.empty() || line.front() == '#') {
       continue;
     }
 
     const auto eq = line.find('=');
     if (eq == std::string_view::npos) {
-      return {std::errc::invalid_argument,
-              "malformed line in credentials file (expected key=value)",
-              {}};
+      return invalid("malformed line in credentials file (expected key=value)");
     }
-    const std::string key = normalize_key(trim(line.substr(0, eq)));
-    const std::string_view value = trim(line.substr(eq + 1));
+    const std::string key = normalize_key(strutil::trim(line.substr(0, eq)));
+    const std::string_view value = strutil::trim(line.substr(eq + 1));
 
-    auto assign = [&](SecureString &target, bool &seen) {
-      if (seen) {
-        return false;
+    if (key == "expiration") {
+      if (have_expiry) {
+        return invalid("duplicate expiration in credentials file");
       }
-      seen = true;
-      secure_reserve(target, value.size());
-      target.assign(value.data(), value.size());
-      return true;
-    };
-
-    if (key == "accesskeyid") {
-      if (!assign(creds.access_key_id_, haveAccess)) {
-        return {std::errc::invalid_argument,
-                "duplicate key in credentials file",
-                {}};
-      }
-    } else if (key == "secretaccesskey") {
-      if (!assign(creds.secret_access_key_, haveSecret)) {
-        return {std::errc::invalid_argument,
-                "duplicate key in credentials file",
-                {}};
-      }
-    } else if (key == "sessiontoken") {
-      if (!assign(creds.session_token_, haveToken)) {
-        return {std::errc::invalid_argument,
-                "duplicate key in credentials file",
-                {}};
-      }
-    } else if (key == "expiration") {
-      if (haveExpiry) {
-        return {std::errc::invalid_argument,
-                "duplicate expiration in credentials file",
-                {}};
-      }
-      haveExpiry = true;
+      have_expiry = true;
       creds.expiration_.assign(value);
-    } else {
-      return {
-          std::errc::invalid_argument, "unknown key in credentials file", {}};
+      continue;
     }
+
+    const auto field =
+        std::find_if(kFields.begin(), kFields.end(),
+                     [&](const FieldSpec &f) { return f.key == key; });
+    if (field == kFields.end()) {
+      return invalid("unknown key in credentials file");
+    }
+    const auto index = static_cast<std::size_t>(field - kFields.begin());
+    if (seen[index]) {
+      return invalid("duplicate key in credentials file");
+    }
+    seen[index] = true;
+    secure_reserve(*slots[index], value.size());
+    slots[index]->assign(value.data(), value.size());
   }
 
-  if (!haveAccess || creds.access_key_id_.empty()) {
-    return {std::errc::invalid_argument,
-            "credentials file has no access_key_id",
-            {}};
+  if (const auto problem = field_problem(slots, seen); !problem.empty()) {
+    return invalid(problem);
   }
-  if (!haveSecret || creds.secret_access_key_.empty()) {
-    return {std::errc::invalid_argument,
-            "credentials file has no secret_access_key",
-            {}};
-  }
-
-  const std::string_view access = creds.access_key_id_;
-  if (access.size() < 16 || access.size() > 128 ||
-      !all_of_set(access, kUpperAlnum)) {
-    return {std::errc::invalid_argument,
-            "access_key_id has an unexpected format",
-            {}};
-  }
-  const std::string_view secret = creds.secret_access_key_;
-  if (secret.size() < 20 || secret.size() > 128 ||
-      !all_of_set(secret, kBase64)) {
-    return {std::errc::invalid_argument,
-            "secret_access_key has an unexpected format",
-            {}};
-  }
-  if (haveToken) {
-    const std::string_view token = creds.session_token_;
-    if (token.size() < 16 || token.size() > 4096 ||
-        !all_of_set(token, kToken)) {
-      return {std::errc::invalid_argument,
-              "session_token has an unexpected format",
-              {}};
-    }
-  }
-  if (haveExpiry) {
-    const auto expiry = parse_expiration(creds.expiration_);
-    if (!expiry) {
-      return {std::errc::invalid_argument,
-              "expiration must look like YYYY-MM-DDTHH:MM:SSZ (UTC)",
-              {}};
-    }
-    if (*expiry <= now) {
-      return {std::errc::invalid_argument, "credentials have expired", {}};
-    }
-    if (*expiry - now <= kMinRemainingSeconds) {
-      return {std::errc::invalid_argument,
-              "credentials expire in 15 minutes or less; refresh them",
-              {}};
-    }
-  } else if (haveToken) {
-    // Temporary credentials with no expiry would be cached by the CLI
-    // forever; refuse rather than hand out something that never refreshes.
-    return {std::errc::invalid_argument,
-            "temporary credentials (session_token) require an expiration",
-            {}};
+  if (const auto problem = expiry_problem(creds.expiration_, have_expiry,
+                                          seen[kSessionToken], now);
+      !problem.empty()) {
+    return invalid(problem);
   }
 
   return {std::errc{}, "ok", std::move(creds)};
@@ -220,7 +231,7 @@ SecureString AwsCredentials::to_credential_process_json() const {
   // Every field was validated against a character set containing no quote,
   // backslash, or control character, so no JSON escaping is needed.
   SecureString out;
-  secure_reserve(out, 512 + session_token_.size());
+  secure_reserve(out, kJsonOverhead + session_token_.size());
   out.append("{\"Version\":1,\"AccessKeyId\":\"").append(access_key_id_);
   out.append("\",\"SecretAccessKey\":\"").append(secret_access_key_);
   out.push_back('"');
