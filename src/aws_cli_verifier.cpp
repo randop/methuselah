@@ -747,6 +747,8 @@ SecurityVerdict match_installation(const AwsCliVerifier::Options &options,
                                    CallerImage &caller) {
   bool any_trusted = false;
   for (const auto &candidate : options.candidates) {
+    SPDLOG_TRACE("checking aws installation candidate: {}",
+                 std::filesystem::path(candidate).string());
     const auto trusted = Security::trusted_executable(candidate, install_trust);
     if (!trusted || trusted->filename() != options.required_name) {
       continue;

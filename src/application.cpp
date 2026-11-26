@@ -354,8 +354,12 @@ int run_aws_flow(const std::string &profile, pid_t caller,
     return EXIT_FAILURE;
   }
 
+  SPDLOG_TRACE("PASS: aws cli verification");
+
+  SPDLOG_TRACE("processing aws gpg credentials...");
   const auto gpg_path = aws_gpg_path(profile);
   if (!gpg_path) {
+    SPDLOG_TRACE("FAIL: aws_gpg_path");
     return EXIT_FAILURE;
   }
   const UniqueFd file(::open(gpg_path->c_str(),
@@ -369,6 +373,7 @@ int run_aws_flow(const std::string &profile, pid_t caller,
     return EXIT_FAILURE;
   }
 
+  SPDLOG_TRACE("unlocking aws credentials...");
   GpgDecryptor decryptor;
   auto unlocked =
       unlock_credentials(decryptor, {file.get(), *gpg_path, signer.fingerprint,
