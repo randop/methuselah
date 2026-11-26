@@ -16,7 +16,7 @@ fs::path home_path() {
   throw std::runtime_error("Failed to get home directory");
 }
 
-fs::path resolve_path(std::string path) {
+fs::path resolve_path(std::string path, bool canonicalize) {
   const fs::path home = home_path();
 
   if (path.starts_with("~/")) {
@@ -43,7 +43,7 @@ fs::path resolve_path(std::string path) {
     p = fs::absolute(p);
   }
 
-  return fs::weakly_canonical(p);
+  return canonicalize ? fs::weakly_canonical(p) : p;
 }
 
 } // namespace methuselah

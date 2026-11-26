@@ -1,17 +1,24 @@
 #include "methuselah/process_info.hpp"
 
+#include "methuselah/fd_io.hpp"
+
+#include <fcntl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <charconv>
 #include <filesystem>
 #include <fstream>
-#include <iterator>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 namespace methuselah {
 
 namespace {
+
+// A process can have up to ARG_MAX (typically 2 MiB) of arguments.
+constexpr std::size_t kMaxCmdlineBytes = 4U << 20;
 
 std::filesystem::path procPath(pid_t pid, const char *leaf) {
   return std::filesystem::path("/proc") / std::to_string(pid) / leaf;
@@ -73,22 +80,50 @@ std::optional<std::string> ProcessInfo::exePath(pid_t pid) {
 }
 
 std::optional<std::string> ProcessInfo::cmdline(pid_t pid) {
-  std::ifstream f(procPath(pid, "cmdline"), std::ios::binary);
-  if (!f) {
+  // Same bounded read as argv(); only the presentation differs: arguments are
+  // joined with spaces for display and logging.
+  auto raw = readProc(pid, "cmdline", kMaxCmdlineBytes);
+  if (!raw) {
+    return std::nullopt;
+  }
+  std::replace(raw->begin(), raw->end(), '\0', ' ');
+  while (!raw->empty() && raw->back() == ' ') {
+    raw->pop_back();
+  }
+  return raw;
+}
+
+std::optional<std::string> ProcessInfo::readProc(pid_t pid, const char *leaf,
+                                                 std::size_t maxBytes) {
+  const std::string path = procPath(pid, leaf).string();
+  const UniqueFd fd(::open(path.c_str(), O_RDONLY | O_CLOEXEC));
+  if (!fd.valid()) {
     return std::nullopt;
   }
 
-  std::string raw((std::istreambuf_iterator<char>(f)),
-                  std::istreambuf_iterator<char>());
-  for (char &c : raw) {
-    if (c == '\0') {
-      c = ' ';
-    }
+  // procfs files report a size of zero, so read until EOF.
+  ReadResult read = read_all(fd.get(), maxBytes);
+  if (read.status != ReadStatus::ok) {
+    return std::nullopt;
   }
-  while (!raw.empty() && raw.back() == ' ') {
-    raw.pop_back();
+  return std::move(read.data);
+}
+
+std::optional<std::vector<std::string>> ProcessInfo::argv(pid_t pid) {
+  const auto raw = readProc(pid, "cmdline");
+  if (!raw) {
+    return std::nullopt;
   }
-  return raw;
+
+  std::vector<std::string> args;
+  std::string_view rest(*raw);
+  while (!rest.empty()) {
+    const auto nul = rest.find('\0');
+    args.emplace_back(rest.substr(0, nul));
+    rest = nul == std::string_view::npos ? std::string_view{}
+                                         : rest.substr(nul + 1);
+  }
+  return args;
 }
 
 std::optional<ProcessInfo::Entry> ProcessInfo::describe(pid_t pid) {

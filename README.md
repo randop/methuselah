@@ -25,9 +25,13 @@ Methuselah is a command-line project focused on credential handling across Git, 
 - **Git** — Credential helper integration.
 - **GPG** — Support for GPG-related credential workflows.
 - **SSH** — Support for SSH-related authentication workflows.
+- **AWS CLI** — `credential_process` helper that releases credentials only to
+  an untampered AWS CLI v2 owned by root or the dedicated `methuselah` service
+  account.
 
 ---
 For additional build options and instructions, see [BUILD.md](BUILD.md).
+For AWS CLI setup and verification details, see [docs/aws.md](docs/aws.md).
 
 ## Security
 

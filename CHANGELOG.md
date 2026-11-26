@@ -5,7 +5,204 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-11-24
+
+### Added
+- `--macro=aws`: an AWS CLI `credential_process` helper. Credentials stay in
+  the GPG-encrypted file mapped by the `[aws:<profile>]` section of
+  `~/.config/pinentry.methuselah` and are released only to a verified AWS CLI
+  v2 as the JSON document the CLI expects, written straight to the pipe it
+  reads. The optional argument selects the profile (`default` when omitted);
+  profile names are 1 to 64 characters from letters, digits, `_`, `-`, `.`,
+  and `@`. Setup and verification are documented in `docs/aws.md`.
+- `AwsCliVerifier`: refuses to hand over credentials unless the caller:
+  - is the native `aws` executable of a supported AWS CLI v2 installation,
+    matched by the inode of `/proc/<pid>/exe`, so a copied, renamed, swapped,
+    or deleted binary fails. Every path component and the executable are owned
+    by root or the `methuselah` service account, never the calling user, and
+    are not writable by group or others. The caller must also share the
+    helper's root and mount namespace;
+  - matches a SHA-256 digest when the root-owned
+    `/etc/methuselah/aws-cli.sha256` pin file exists. The file is a
+    `sha256sum`-style list with `#` comments and blank lines; a file that is
+    present but not root-owned, unreadable, malformed, empty, or larger than
+    64 KiB fails closed;
+  - reports no attached tracer (a snapshot) and runs under a Yama
+    `ptrace_scope` of at least 2, which is what stops a same-user parent from
+    attaching later; a root-owned `/etc/methuselah/allow-weak-ptrace` waives
+    this;
+  - was not started with `--endpoint-url`, `--ca-bundle`, `--no-verify-ssl`,
+    `--debug`, `--cli-auto-prompt`, or `configure export-credentials`,
+    including unambiguous option prefixes; `--cli-auto-prompt` is refused even
+    after `--`;
+  - was not started with loader, interpreter, endpoint, model, trust-store, or
+    token-file overrides: `LD_*`, `PYTHON*`, `MALLOC_*`, `GCONV_PATH`,
+    `LOCPATH`, `NLSPATH`, `HOSTALIASES`, `AWS_ENDPOINT_URL*`, `AWS_DATA_PATH`,
+    `AWS_CA_BUNDLE`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`,
+    `AWS_CONTAINER_CREDENTIALS_FULL_URI`,
+    `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`,
+    `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+    or `SSLKEYLOGFILE`. `AWS_CLI_AUTO_PROMPT` must be unset or `off`. The
+    official bundle may set `LD_LIBRARY_PATH` to exactly its own executable
+    directory once; `LD_LIBRARY_PATH_ORIG` and any other value are refused;
+  - has a root-controlled, non-empty `HOME` set once; the `.aws` directory and
+    any `.aws/config` or `.aws/credentials` file are root-controlled too.
+    `config` has no `[plugins]` section, and neither file enables auto-prompt
+    (`cli_auto_prompt` must be unset or `off` in every profile);
+  - maps only executable files owned by root or the `methuselah` account
+    through trusted paths, apart from libffi's `/memfd:libffi` trampoline.
+    Deleted mappings other than that trampoline are refused.
+- `scripts/aws.sh` installs the official AWS CLI v2 for an unprivileged
+  `methuselah` system user on Linux x86_64 or aarch64. The bundle lives under
+  `/opt/methuselah/aws-cli`, owned by `methuselah:users` with read and execute
+  access for `users`; `/opt/methuselah`, the `/usr/local/bin/aws` and
+  `aws_completer` symlinks, and the refreshed SHA-256 pin are root-owned. The
+  script refuses to run as root or as `methuselah`, creates the service user
+  and `users` group when needed, adds the invoking account to `users`, and can
+  be rerun to update the CLI and refresh the pin.
+- `Security::trusted_file()`, `Security::trusted_directory()`, and
+  `TrustPolicy` extend the `trusted_executable()` path and ownership checks to
+  regular files and directories and to an explicit owner list.
+  `ProcessInfo::readProc()` and `ProcessInfo::argv()`,
+  `GpgDecryptor::decrypt_fd()`, and `resolve_path(..., canonicalize)` support
+  the AWS flow.
+- `InstanceLock::Mode::wait`: concurrent `credential_process` calls wait on a
+  separate lock file instead of exiting, in no guaranteed order and for at most
+  three minutes; `SIGINT`/`SIGTERM` cancel the wait.
+- `AwsSigners` and `GpgDecryptor::decrypt_fd(..., required_signer)`: when the
+  root-owned `/etc/methuselah/aws-signers` lists a profile, its credential
+  file must be signed (and encrypted) by exactly that OpenPGP key. Other
+  profiles, and an absent policy file, enforce nothing; a policy file that is
+  not root-owned or is malformed fails closed.
+- Unit tests (`meson test -C .build`) for credential parsing, argument,
+  environment, CLI-config, memory-map, pin, and hash checks, the trust policy,
+  service-account installs, `SecurityVerdict`, and `verify()` against real
+  `/proc` state from child processes. The test target is built on demand and
+  needs neither raylib nor GPG.
+- `docs/aws.md` with install, encryption, profile, CLI-home, pinning, and
+  verification guidance; the README lists AWS CLI support and links to it.
+
+### Changed
+- `AwsCliVerifier` accepts root-owned AWS CLI v2 installations and
+  installations owned by the unprivileged `methuselah` service account,
+  including `/opt/methuselah/aws-cli`. Path components may belong to root or
+  `methuselah`, but never to the calling user, and must not be writable by
+  group or others.
+- `Security::verify_git()`, `verify_gpg()`, `verify_ssh()`, and `verify_aws()`
+  return a `SecurityVerdict` (`std::errc` result plus a reason). Success uses
+  `std::errc{}`, policy refusals use `std::errc::permission_denied`, and
+  verification faults use `std::errc::io_error`. The verdict can be unpacked
+  with `const auto [result, reason] = ...`. `reason` is a `std::string_view`
+  that only accepts string literals, so it cannot dangle; variable detail
+  (an argument, variable, or path) moved to trace logging. `AwsVerdict` and the
+  `verify_aws(std::string *)` out-parameter are gone, and
+  `AwsCredentials::parse()` returns an `AwsParseResult` in the same shape.
+- The AWS macro decrypts from the already-open, verified credential file
+  descriptor and rewinds it for retries, rather than reopening the path. The
+  final path component may not be a symlink.
+- The unknown-macro check now runs before the instance lock is taken.
+- Internal clean-up of the AWS helper, with no change to what it accepts or
+  refuses. `AwsCliVerifier::verify()` is split into one function per check
+  (tracer, executable identity, pin, arguments, launch context, memory maps);
+  `AwsCredentials::parse()` is table-driven; one `read_all()`/`read_chunks()`
+  loop, `UniqueFd`, and `strutil` helpers (`include/methuselah/fd_io.hpp`,
+  `text_util.hpp`) replace the per-file copies; `Security::read_trusted_file()`
+  is the single "read a root-owned policy file" routine behind the pin file and
+  the signer policy; `DecryptResult::not_signed()` replaces matching the error
+  text; the redundant `verdict()` wrapper and the hand-written `starts_with`
+  are gone. The instance lock's wait loop is its own function and uses
+  `steady_clock`.
+- `ProcessInfo::cmdline()` now reads through the same bounded reader as
+  `argv()` (4 MiB limit) instead of an unbounded stream.
+
+### Security
+- The AWS CLI pin file is now read with the same checks as the signer policy:
+  opened with `O_NOFOLLOW`, and the opened descriptor must itself be a regular
+  file owned by root without group or other write access. Previously only the
+  path was vetted before the open.
+- Output is bound to the verified caller: stdout must be a pipe whose read end
+  the AWS CLI holds, checked before the prompt and again before writing.
+  Sockets and pipes read by anyone else are refused.
+- The environment check is deny-by-default for `AWS_*` (only inert settings
+  such as `AWS_PROFILE` and `AWS_REGION` pass) and also refuses `OPENSSL_*`,
+  which can load code or swap the trust store after the one-time memory-map
+  check.
+- Memory maps are rejected when a file mapping is writable and executable,
+  or any region is anonymous and executable (the latter can be accepted with a
+  root-owned `/etc/methuselah/allow-anonymous-exec`, because some libffi
+  builds use anonymous executable memory for closures).
+- Credentials that expire within 15 minutes are refused, because the CLI would
+  otherwise re-run the helper, and its passphrase prompt, on every request.
+- The passphrase prompt closes after two minutes and the `credential_process`
+  lock wait gives up after three, so an abandoned dialog cannot block every
+  later request for ever.
+- `scripts/aws.sh` verifies the AWS CLI installer's signature against the
+  published signing key and downloads, verifies, unpacks, and runs it inside a
+  private directory owned by the service account, so another process of the
+  invoking user cannot swap files between verification and installation (the
+  SHA-256 pin is taken from what was installed).
+- The AWS macro re-verifies the caller after the passphrase prompt, right
+  before writing credentials. It checks that the parent is still the verified
+  caller, aborts if a signal arrived, and refuses a stdout that is not a pipe
+  the caller reads.
+- The encrypted credentials file must be a regular file owned by the user and
+  not writable by group or others; a symlink in its final path component is
+  refused.
+- Credentials accept both the short names and the `~/.aws/credentials`
+  spellings. Unknown and duplicate keys are rejected. Access keys, secret
+  keys, and session tokens are length- and character-checked; `session_token`
+  requires an `expiration` in `YYYY-MM-DDTHH:MM:SSZ` UTC form that is still in
+  the future. Errors never include secret values.
+- Credentials are parsed into guarded `SecureString`s, and the JSON document
+  is assembled and written with the secure memory helpers rather than
+  `std::cout`.
+- A failed, cancelled, or contended AWS request exits non-zero with no output;
+  it never reports an empty success.
+
+## [0.7.1] - 2026-11-23
+
+### Security
+- Fixed CVE-2026-129975, a double free in GPGME's `read_status()` and
+  `read_colon_line()` reachable through a crafted OpenPGP key with a very long
+  user ID. Both functions grew their 1024-byte buffer but only wrote the new
+  pointer back to the engine context on exit, so early returns left a stale
+  pointer that was later freed a second time. The flaw dates back to 2002 and
+  could allow data exfiltration and possibly remote code execution.
+
+### Changed
+- Raised the minimum GPGME version from 2.2.0 to 2.3.1 in `meson.build`, and
+  `scripts/deps.sh` now builds gpgme 2.3.1.
+- `scripts/deps.sh` rebuilds gpgme when its pkg-config metadata is missing or
+  older than the pinned version, so an existing 2.2.0 build is replaced.
+
 ## [0.7.0] - 2026-11-21
+
+### Added
+- `tests/security.sh`, a Linux-only script that launches the helper and checks
+  its process hardening, with an optional check that startup is refused under
+  `strace`.
+- `scripts/deps-x11.sh` builds the X11 libraries and OpenGL dispatch under
+  `$HOME/opt/x11`.
+- `scripts/tests.sh`, an end-to-end test that reloads the GPG agent and runs a
+  `gpg --clearsign` passphrase prompt through the pinentry.
+- Local `fmt` 12.0.0 wrap in `subprojects/` so spdlog's `fmt` dependency does
+  not rely on WrapDB.
+
+### Changed
+- libsodium 1.0.22 or newer, built as a static library, is now a required
+  dependency. `scripts/deps.sh` builds it when the distribution does not supply
+  it, and `BUILD.md` documents the requirement.
+- `scripts/compile.sh` and `scripts/debug.sh` add the X11 prefix to
+  `PKG_CONFIG_PATH` and `CMAKE_PREFIX_PATH`, and reconfigure Meson when
+  `build.ninja` is missing instead of only checking for the build directory.
+  `scripts/compile.sh` also warns when X11 has not been built.
+
+### Fixed
+- Build detects whether the compiler supports C++23 `std::format` and disables
+  spdlog's `std_format` option when it does not (for example on GCC 12).
+- `scripts/deps.sh` puts the locally built libgpg-error first in `PATH`, so
+  gpgme's configure step no longer picks up the system libgpg-error 1.46 when
+  it needs 1.47 or newer.
 
 ### Security
 - Added libsodium guarded memory for secrets via `SecureString` and
